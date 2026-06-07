@@ -1,0 +1,12 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# kungfu — generated index is local, config is kept
+/.kungfu/index/
+
+# Env / local
+.env
+.env.*
+!.env.example
