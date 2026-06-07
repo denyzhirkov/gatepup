@@ -1,4 +1,5 @@
 use gatepup_config::{ConfigError, ValidationError};
+use gatepup_proxy::ProxyError;
 use thiserror::Error;
 
 /// Failure of a top-level use case. Wraps lower-level config errors and carries
@@ -13,6 +14,9 @@ pub enum CoreError {
 
     #[error("failed to serialize config: {0}")]
     Serialize(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Proxy(#[from] ProxyError),
 }
 
 impl CoreError {

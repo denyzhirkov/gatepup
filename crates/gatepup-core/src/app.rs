@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use gatepup_config::{load_from_file, validate, GatePupConfig};
 
@@ -17,4 +18,12 @@ pub fn print_config(path: impl AsRef<Path>) -> Result<String, CoreError> {
     let config = load_validated(path)?;
     let rendered = serde_json::to_string_pretty(&config)?;
     Ok(rendered)
+}
+
+/// Load, validate, build the runtime snapshot, and serve until shutdown.
+pub async fn serve_from_file(path: impl AsRef<Path>) -> Result<(), CoreError> {
+    let config = load_validated(path)?;
+    let snapshot = Arc::new(gatepup_proxy::build_snapshot(&config)?);
+    gatepup_proxy::run(snapshot).await?;
+    Ok(())
 }

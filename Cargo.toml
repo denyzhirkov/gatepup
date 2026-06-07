@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gatepup-config",
     "crates/gatepup-core",
+    "crates/gatepup-proxy",
     "crates/gatepup-cli",
 ]
 
@@ -21,6 +22,13 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
 
 gatepup-config = { path = "crates/gatepup-config" }
 gatepup-core = { path = "crates/gatepup-core" }
+gatepup-proxy = { path = "crates/gatepup-proxy" }
