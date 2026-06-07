@@ -6,6 +6,7 @@
 //! (config reload) is a later concern; the structure is already immutable.
 
 mod error;
+mod health;
 mod proxy;
 mod router;
 mod server;

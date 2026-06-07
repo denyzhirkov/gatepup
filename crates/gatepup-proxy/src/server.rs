@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::error::ProxyError;
+use crate::health::{build_health_client, run_health_checks};
 use crate::proxy::{build_client, handle, ProxyClient};
 use crate::snapshot::{ListenerRuntime, RuntimeConfig};
 
@@ -42,6 +43,21 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
             client.clone(),
             shutdown_rx.clone(),
         )));
+    }
+
+    // Active health checks for upstreams that opted in.
+    let health_client = build_health_client();
+    for (name, upstream) in &snapshot.upstreams {
+        if let Some(settings) = upstream.health.clone() {
+            tracing::info!(upstream = %name, "active health checks enabled");
+            handles.push(tokio::spawn(run_health_checks(
+                name.clone(),
+                upstream.clone(),
+                settings,
+                health_client.clone(),
+                shutdown_rx.clone(),
+            )));
+        }
     }
 
     for handle in handles {

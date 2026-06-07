@@ -125,10 +125,21 @@ async fn forward(
     let upstream_req = build_upstream_request(req, &target.url, host, remote, request_id)
         .map_err(|_| GatewayError::BadGateway)?;
 
+    // Passive health: feed each proxied outcome into the target's health state.
+    // Connect error / timeout / 5xx count as failures; anything else succeeds.
     match tokio::time::timeout(REQUEST_TIMEOUT, client.request(upstream_req)).await {
-        Err(_elapsed) => Err(GatewayError::UpstreamTimeout),
-        Ok(Err(_)) => Err(GatewayError::UpstreamConnect),
-        Ok(Ok(resp)) => Ok(resp.map(|body| body.map_err(|e| Box::new(e) as BoxError).boxed())),
+        Err(_elapsed) => {
+            target.state.observe(false);
+            Err(GatewayError::UpstreamTimeout)
+        }
+        Ok(Err(_)) => {
+            target.state.observe(false);
+            Err(GatewayError::UpstreamConnect)
+        }
+        Ok(Ok(resp)) => {
+            target.state.observe(resp.status().as_u16() < 500);
+            Ok(resp.map(|body| body.map_err(|e| Box::new(e) as BoxError).boxed()))
+        }
     }
 }
 

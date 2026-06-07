@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use gatepup_config::GatePupConfig;
 
 use crate::error::ProxyError;
+use crate::health::{HealthCheckSettings, HealthState};
 use crate::router::Router;
 
 /// Immutable runtime view of the configuration. Built once and shared via
@@ -24,26 +26,19 @@ pub(crate) struct ListenerRuntime {
 
 pub(crate) struct UpstreamRuntime {
     pub(crate) targets: Vec<TargetRuntime>,
+    /// Active-health settings when health management is enabled for this upstream.
+    pub(crate) health: Option<HealthCheckSettings>,
     next: AtomicUsize,
 }
 
 pub(crate) struct TargetRuntime {
     pub(crate) url: String,
-    healthy: AtomicBool,
-}
-
-impl TargetRuntime {
-    fn new(url: String) -> Self {
-        Self {
-            url,
-            healthy: AtomicBool::new(true),
-        }
-    }
+    pub(crate) state: HealthState,
 }
 
 impl UpstreamRuntime {
     /// Round-robin over the healthy targets. Returns `None` when every target
-    /// is unhealthy. Health checks (a later step) flip the `healthy` flag.
+    /// is unhealthy.
     pub(crate) fn pick_target(&self) -> Option<&TargetRuntime> {
         let n = self.targets.len();
         if n == 0 {
@@ -52,7 +47,7 @@ impl UpstreamRuntime {
         for _ in 0..n {
             let idx = self.next.fetch_add(1, Ordering::Relaxed) % n;
             let target = &self.targets[idx];
-            if target.healthy.load(Ordering::Relaxed) {
+            if target.state.is_healthy() {
                 return Some(target);
             }
         }
@@ -66,15 +61,36 @@ impl UpstreamRuntime {
 pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyError> {
     let mut upstreams = HashMap::with_capacity(config.upstreams.len());
     for upstream in &config.upstreams {
+        let hc = upstream.health_check.as_ref();
+        // Health management is opt-in via an enabled health check. When off,
+        // targets stay healthy and observations are no-ops (see `health` module).
+        let managed = hc.map(|h| h.enabled).unwrap_or(false);
+        let (healthy_threshold, unhealthy_threshold) = hc
+            .map(|h| (h.healthy_threshold, h.unhealthy_threshold))
+            .unwrap_or((1, 3));
+        let settings = if managed {
+            hc.map(|h| HealthCheckSettings {
+                path: h.path.clone(),
+                interval: Duration::from_secs(h.interval_seconds),
+                timeout: Duration::from_millis(h.timeout_ms),
+            })
+        } else {
+            None
+        };
+
         let targets = upstream
             .targets
             .iter()
-            .map(|t| TargetRuntime::new(t.url.clone()))
+            .map(|t| TargetRuntime {
+                url: t.url.clone(),
+                state: HealthState::new(managed, healthy_threshold, unhealthy_threshold),
+            })
             .collect();
         upstreams.insert(
             upstream.name.clone(),
             Arc::new(UpstreamRuntime {
                 targets,
+                health: settings,
                 next: AtomicUsize::new(0),
             }),
         );
@@ -103,12 +119,17 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
 mod tests {
     use super::*;
 
+    // Managed health with threshold 1 so a single `observe(false)` ejects.
     fn upstream(urls: &[&str]) -> UpstreamRuntime {
         UpstreamRuntime {
             targets: urls
                 .iter()
-                .map(|u| TargetRuntime::new(u.to_string()))
+                .map(|u| TargetRuntime {
+                    url: u.to_string(),
+                    state: HealthState::new(true, 1, 1),
+                })
                 .collect(),
+            health: None,
             next: AtomicUsize::new(0),
         }
     }
@@ -127,7 +148,7 @@ mod tests {
     #[test]
     fn pick_target_skips_unhealthy() {
         let u = upstream(&["a", "b", "c"]);
-        u.targets[1].healthy.store(false, Ordering::Relaxed);
+        u.targets[1].state.observe(false); // eject "b"
         let seq: Vec<String> = (0..4).filter_map(|_| pick(&u)).collect();
         assert!(seq.iter().all(|url| url != "b"), "got {seq:?}");
         assert!(seq.contains(&"a".to_string()) && seq.contains(&"c".to_string()));
@@ -137,7 +158,7 @@ mod tests {
     fn pick_target_none_when_all_unhealthy() {
         let u = upstream(&["a", "b"]);
         for t in &u.targets {
-            t.healthy.store(false, Ordering::Relaxed);
+            t.state.observe(false);
         }
         assert!(u.pick_target().is_none());
     }

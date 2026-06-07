@@ -1,11 +1,12 @@
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use gatepup_config::{
-    AppConfig, GatePupConfig, ListenerConfig, MatchConfig, Protocol, RouteConfig, TargetConfig,
-    UpstreamConfig,
+    AppConfig, GatePupConfig, HealthCheckConfig, ListenerConfig, MatchConfig, Protocol,
+    RouteConfig, TargetConfig, UpstreamConfig,
 };
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
@@ -69,6 +70,102 @@ async fn spawn_header_echo_backend() -> u16 {
         }
     });
     port
+}
+
+/// A backend whose `/health` returns 200 or 500 depending on a shared flag;
+/// every other path returns `200 ok`. Lets tests drive health transitions.
+async fn spawn_flag_backend(initial_healthy: bool) -> (u16, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let flag = Arc::new(AtomicBool::new(initial_healthy));
+    let flag_for_loop = flag.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let flag = flag_for_loop.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let flag = flag.clone();
+                    async move {
+                        let resp = if req.uri().path() == "/health" {
+                            let code = if flag.load(Ordering::Relaxed) {
+                                200
+                            } else {
+                                500
+                            };
+                            Response::builder()
+                                .status(code)
+                                .body(Full::new(Bytes::new()))
+                                .unwrap()
+                        } else {
+                            Response::new(Full::new(Bytes::from_static(b"ok")))
+                        };
+                        Ok::<_, Infallible>(resp)
+                    }
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    (port, flag)
+}
+
+/// Config with active health checks enabled (1s interval, threshold 1) over the
+/// given target ports.
+fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) -> GatePupConfig {
+    GatePupConfig {
+        app: AppConfig {
+            name: "test".to_string(),
+            log_level: "error".to_string(),
+        },
+        listeners: vec![ListenerConfig {
+            name: "test".to_string(),
+            bind: format!("127.0.0.1:{proxy_port}"),
+            protocol: Protocol::Http,
+            routes: vec![RouteConfig {
+                name: "r".to_string(),
+                matcher: MatchConfig {
+                    host: None,
+                    path_prefix: Some("/".to_string()),
+                },
+                upstream: "u".to_string(),
+            }],
+        }],
+        upstreams: vec![UpstreamConfig {
+            name: "u".to_string(),
+            load_balancing: Default::default(),
+            targets: target_ports
+                .iter()
+                .map(|p| TargetConfig {
+                    url: format!("http://127.0.0.1:{p}"),
+                    weight: 1,
+                })
+                .collect(),
+            health_check: Some(HealthCheckConfig {
+                enabled: true,
+                path: health_path.to_string(),
+                interval_seconds: 1,
+                timeout_ms: 500,
+                healthy_threshold: 1,
+                unhealthy_threshold: 1,
+            }),
+        }],
+        admin: None,
+        metrics: None,
+    }
+}
+
+async fn wait_for_status(port: u16, expected: u16, label: &str) {
+    for _ in 0..60 {
+        if get(port).await.status().as_u16() == expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{label}: never observed status {expected}");
 }
 
 fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConfig {
@@ -188,6 +285,49 @@ async fn forwards_proxy_headers_to_upstream() {
         seen.contains(&format!("host: 127.0.0.1:{backend_port}")),
         "host not rewritten in {seen:?}"
     );
+}
+
+#[tokio::test]
+async fn active_checks_exclude_dead_target() {
+    let live_port = spawn_backend().await; // answers 200 on every path incl. /health
+    let dead_port = free_port(); // nothing listening → probes fail
+    let proxy_port = free_port();
+    spawn_proxy(config_with_health(
+        proxy_port,
+        &[live_port, dead_port],
+        "/health",
+    ))
+    .await;
+    wait_until_listening(proxy_port).await;
+
+    // Once the dead target is ejected, every request must succeed.
+    wait_for_status(proxy_port, 200, "after ejection").await;
+    for _ in 0..6 {
+        assert_eq!(
+            get(proxy_port).await.status(),
+            200,
+            "dead target not excluded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn active_checks_eject_then_recover() {
+    // Start unhealthy: /health returns 500 until we flip the flag.
+    let (backend_port, healthy) = spawn_flag_backend(false).await;
+    let proxy_port = free_port();
+    spawn_proxy(config_with_health(proxy_port, &[backend_port], "/health")).await;
+    wait_until_listening(proxy_port).await;
+
+    // Sole target is unhealthy → 503 no_healthy_upstream.
+    wait_for_status(proxy_port, 503, "while unhealthy").await;
+    let resp = get(proxy_port).await;
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("no_healthy_upstream"));
+
+    // Flip backend healthy → active probe recovers it → 200.
+    healthy.store(true, Ordering::Relaxed);
+    wait_for_status(proxy_port, 200, "after recovery").await;
 }
 
 #[tokio::test]
