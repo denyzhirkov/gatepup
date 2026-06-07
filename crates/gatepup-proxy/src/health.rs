@@ -11,9 +11,9 @@
 //! active probes, so a passively-ejected target can come back. When health is
 //! unmanaged, every target stays healthy and `observe` is a no-op.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http::uri::PathAndQuery;
@@ -42,6 +42,8 @@ pub(crate) struct HealthState {
     healthy: AtomicBool,
     successes: AtomicU32,
     failures: AtomicU32,
+    /// Unix epoch millis of the last observation; 0 means never observed.
+    last_check_ms: AtomicU64,
     healthy_threshold: u32,
     unhealthy_threshold: u32,
     managed: bool,
@@ -53,6 +55,7 @@ impl HealthState {
             healthy: AtomicBool::new(true),
             successes: AtomicU32::new(0),
             failures: AtomicU32::new(0),
+            last_check_ms: AtomicU64::new(0),
             healthy_threshold: healthy_threshold.max(1),
             unhealthy_threshold: unhealthy_threshold.max(1),
             managed,
@@ -63,6 +66,10 @@ impl HealthState {
         self.healthy.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn last_check_ms(&self) -> u64 {
+        self.last_check_ms.load(Ordering::Relaxed)
+    }
+
     /// Record one observation and apply consecutive-threshold transitions.
     /// No-op when health is unmanaged. Concurrency-safe but best-effort: counts
     /// may race slightly at the boundary, which is acceptable for health.
@@ -70,6 +77,7 @@ impl HealthState {
         if !self.managed {
             return;
         }
+        self.last_check_ms.store(now_ms(), Ordering::Relaxed);
         if success {
             self.failures.store(0, Ordering::Relaxed);
             let streak = self.successes.fetch_add(1, Ordering::Relaxed) + 1;
@@ -84,6 +92,13 @@ impl HealthState {
             }
         }
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub(crate) fn build_health_client() -> HealthClient {

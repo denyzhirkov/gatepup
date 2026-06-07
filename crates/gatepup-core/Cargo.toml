@@ -7,5 +7,8 @@ license.workspace = true
 [dependencies]
 gatepup-config.workspace = true
 gatepup-proxy.workspace = true
+gatepup-admin.workspace = true
+gatepup-observability.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

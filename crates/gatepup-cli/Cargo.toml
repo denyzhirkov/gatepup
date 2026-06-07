@@ -10,8 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 gatepup-core.workspace = true
+gatepup-observability.workspace = true
 clap.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-anyhow.workspace = true
 tokio.workspace = true

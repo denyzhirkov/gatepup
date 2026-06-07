@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gatepup_config::GatePupConfig;
+use serde::Serialize;
 
 use crate::error::ProxyError;
 use crate::health::{HealthCheckSettings, HealthState};
@@ -52,6 +53,93 @@ impl UpstreamRuntime {
             }
         }
         None
+    }
+}
+
+/// Read-only route view for the admin API.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteView {
+    pub listener: String,
+    pub name: String,
+    pub host: Option<String>,
+    pub path_prefix: String,
+    pub upstream: String,
+}
+
+/// Read-only upstream view for the admin API.
+#[derive(Serialize)]
+pub struct UpstreamView {
+    pub name: String,
+    pub targets: Vec<TargetView>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetView {
+    pub url: String,
+    pub healthy: bool,
+    /// Unix epoch millis of the last health observation; 0 if never checked.
+    pub last_check_epoch_ms: u64,
+}
+
+impl RuntimeConfig {
+    /// All routes across all listeners, for `GET /routes`.
+    pub fn routes(&self) -> Vec<RouteView> {
+        self.listeners
+            .iter()
+            .flat_map(|listener| {
+                let listener_name = listener.name.clone();
+                listener
+                    .router
+                    .summaries()
+                    .into_iter()
+                    .map(move |s| RouteView {
+                        listener: listener_name.clone(),
+                        name: s.name,
+                        host: s.host,
+                        path_prefix: s.path_prefix,
+                        upstream: s.upstream,
+                    })
+            })
+            .collect()
+    }
+
+    /// All upstreams with per-target health, for `GET /upstreams`. Sorted by name.
+    pub fn upstreams_view(&self) -> Vec<UpstreamView> {
+        let mut views: Vec<UpstreamView> = self
+            .upstreams
+            .iter()
+            .map(|(name, upstream)| UpstreamView {
+                name: name.clone(),
+                targets: upstream
+                    .targets
+                    .iter()
+                    .map(|t| TargetView {
+                        url: t.url.clone(),
+                        healthy: t.state.is_healthy(),
+                        last_check_epoch_ms: t.state.last_check_ms(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        views.sort_by(|a, b| a.name.cmp(&b.name));
+        views
+    }
+
+    /// `(upstream, healthy target count)` pairs, for the metrics gauge.
+    pub fn healthy_counts(&self) -> Vec<(String, i64)> {
+        self.upstreams
+            .iter()
+            .map(|(name, upstream)| {
+                let healthy = upstream
+                    .targets
+                    .iter()
+                    .filter(|t| t.state.is_healthy())
+                    .count() as i64;
+                (name.clone(), healthy)
+            })
+            .collect()
     }
 }
 

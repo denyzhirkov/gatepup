@@ -1,4 +1,6 @@
+use gatepup_admin::AdminError;
 use gatepup_config::{ConfigError, ValidationError};
+use gatepup_observability::MetricsError;
 use gatepup_proxy::ProxyError;
 use thiserror::Error;
 
@@ -17,6 +19,15 @@ pub enum CoreError {
 
     #[error(transparent)]
     Proxy(#[from] ProxyError),
+
+    #[error(transparent)]
+    Metrics(#[from] MetricsError),
+
+    #[error(transparent)]
+    Admin(#[from] AdminError),
+
+    #[error("invalid admin bind address {0:?}")]
+    AdminBind(String),
 }
 
 impl CoreError {

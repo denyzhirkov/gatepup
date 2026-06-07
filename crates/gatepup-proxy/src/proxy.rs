@@ -14,6 +14,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 
+use gatepup_observability::Metrics;
+
 use crate::snapshot::{ListenerRuntime, RuntimeConfig};
 use crate::BoxError;
 
@@ -66,14 +68,23 @@ impl GatewayError {
     }
 }
 
+/// A successfully forwarded response plus the route/upstream it resolved to.
+struct Forwarded {
+    response: Response<ResponseBody>,
+    route: String,
+    upstream: String,
+}
+
 /// Handle one request: match a route, forward to an upstream target, and stream
 /// the response back. Always resolves to a `Response` — failures become mapped
 /// error responses, never a service error.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
     req: Request<Incoming>,
     listener: Arc<ListenerRuntime>,
     config: Arc<RuntimeConfig>,
     client: ProxyClient,
+    metrics: Arc<Metrics>,
     remote: SocketAddr,
 ) -> Response<ResponseBody> {
     let started = Instant::now();
@@ -82,17 +93,31 @@ pub(crate) async fn handle(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
-    let response = match forward(req, &listener, &config, &client, &host, remote, &request_id).await
-    {
-        Ok(resp) => resp,
-        Err(err) => error_response(err, &request_id),
-    };
+    metrics.inc_requests();
+    let (response, route, upstream) =
+        match forward(req, &listener, &config, &client, &host, remote, &request_id).await {
+            Ok(f) => {
+                metrics.inc_upstream_requests();
+                (f.response, Some(f.route), Some(f.upstream))
+            }
+            Err(err) => {
+                if matches!(err, GatewayError::RouteNotFound) {
+                    metrics.inc_route_not_found();
+                } else {
+                    metrics.inc_upstream_errors();
+                }
+                (error_response(err, &request_id), None, None)
+            }
+        };
 
+    metrics.observe_duration(started.elapsed().as_secs_f64());
     tracing::info!(
         request_id = %request_id,
         method = %method,
         host = %host,
         path = %path,
+        route = route.as_deref().unwrap_or("-"),
+        upstream = upstream.as_deref().unwrap_or("-"),
         status = response.status().as_u16(),
         duration_ms = started.elapsed().as_millis() as u64,
         "request"
@@ -109,11 +134,13 @@ async fn forward(
     host: &str,
     remote: SocketAddr,
     request_id: &str,
-) -> Result<Response<ResponseBody>, GatewayError> {
+) -> Result<Forwarded, GatewayError> {
     let route = listener
         .router
         .match_route(host, req.uri().path())
         .ok_or(GatewayError::RouteNotFound)?;
+    let route_name = route.name.clone();
+    let upstream_name = route.upstream.clone();
     let upstream = config
         .upstreams
         .get(&route.upstream)
@@ -138,7 +165,11 @@ async fn forward(
         }
         Ok(Ok(resp)) => {
             target.state.observe(resp.status().as_u16() < 500);
-            Ok(resp.map(|body| body.map_err(|e| Box::new(e) as BoxError).boxed()))
+            Ok(Forwarded {
+                response: resp.map(|body| body.map_err(|e| Box::new(e) as BoxError).boxed()),
+                route: route_name,
+                upstream: upstream_name,
+            })
         }
     }
 }

@@ -2,11 +2,20 @@ use gatepup_config::RouteConfig;
 
 /// A route compiled for fast matching at request time.
 pub(crate) struct CompiledRoute {
+    pub(crate) name: String,
     pub(crate) upstream: String,
     /// Exact host to match, or `None` to match any host.
     host: Option<String>,
     /// Path prefix; defaults to `/` (matches every path).
     path_prefix: String,
+}
+
+/// Read-only view of a route for admin/introspection.
+pub(crate) struct RouteSummary {
+    pub(crate) name: String,
+    pub(crate) host: Option<String>,
+    pub(crate) path_prefix: String,
+    pub(crate) upstream: String,
 }
 
 impl CompiledRoute {
@@ -35,6 +44,7 @@ impl Router {
         let routes = routes
             .iter()
             .map(|r| CompiledRoute {
+                name: r.name.clone(),
                 upstream: r.upstream.clone(),
                 host: r.matcher.host.clone().filter(|h| !h.is_empty()),
                 path_prefix: r
@@ -53,6 +63,18 @@ impl Router {
             .iter()
             .filter(|r| r.matches(host, path))
             .max_by_key(|r| r.specificity())
+    }
+
+    pub(crate) fn summaries(&self) -> Vec<RouteSummary> {
+        self.routes
+            .iter()
+            .map(|r| RouteSummary {
+                name: r.name.clone(),
+                host: r.host.clone(),
+                path_prefix: r.path_prefix.clone(),
+                upstream: r.upstream.clone(),
+            })
+            .collect()
     }
 }
 

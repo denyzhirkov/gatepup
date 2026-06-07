@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use gatepup_core::{load_validated, print_config, serve_from_file, CoreError};
-use tracing_subscriber::EnvFilter;
+use gatepup_core::{load_validated, print_config, serve, CoreError};
+use gatepup_observability::init_logging;
 
 #[derive(Parser)]
 #[command(
@@ -36,7 +36,6 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    init_tracing();
     let cli = Cli::parse();
 
     match cli.command {
@@ -58,8 +57,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Build a multi-threaded Tokio runtime and serve the proxy until shutdown.
+/// Load and validate the config, install JSON logging, then serve until Ctrl-C.
 fn run(config: PathBuf) -> ExitCode {
+    let config = match load_validated(&config) {
+        Ok(cfg) => cfg,
+        Err(err) => return report(err),
+    };
+    init_logging(&config.app.log_level);
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -71,7 +76,7 @@ fn run(config: PathBuf) -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve_from_file(&config)) {
+    match runtime.block_on(serve(config)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => report(err),
     }
@@ -89,12 +94,4 @@ fn report(err: CoreError) -> ExitCode {
         eprintln!("error: {err}");
     }
     ExitCode::FAILURE
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_env("GATEPUP_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
 }

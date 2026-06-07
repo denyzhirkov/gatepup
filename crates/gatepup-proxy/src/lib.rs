@@ -13,8 +13,8 @@ mod server;
 mod snapshot;
 
 pub use error::ProxyError;
-pub use server::run;
-pub use snapshot::{build_snapshot, RuntimeConfig};
+pub use server::{run, serve};
+pub use snapshot::{build_snapshot, RouteView, RuntimeConfig, TargetView, UpstreamView};
 
 /// Boxed error used as the unified error type for response bodies.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

@@ -4,6 +4,8 @@ members = [
     "crates/gatepup-config",
     "crates/gatepup-core",
     "crates/gatepup-proxy",
+    "crates/gatepup-observability",
+    "crates/gatepup-admin",
     "crates/gatepup-cli",
 ]
 
@@ -28,7 +30,10 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "server",
 http = "1"
 http-body-util = "0.1"
 bytes = "1"
+prometheus = { version = "0.13", default-features = false }
 
 gatepup-config = { path = "crates/gatepup-config" }
 gatepup-core = { path = "crates/gatepup-core" }
 gatepup-proxy = { path = "crates/gatepup-proxy" }
+gatepup-observability = { path = "crates/gatepup-observability" }
+gatepup-admin = { path = "crates/gatepup-admin" }

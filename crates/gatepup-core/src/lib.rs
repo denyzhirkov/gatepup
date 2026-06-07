@@ -5,5 +5,5 @@
 mod app;
 mod error;
 
-pub use app::{load_validated, print_config, serve_from_file};
+pub use app::{load_validated, print_config, serve};
 pub use error::CoreError;

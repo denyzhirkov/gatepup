@@ -17,4 +17,7 @@ pub enum ProxyError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("failed to initialize metrics: {0}")]
+    Metrics(String),
 }

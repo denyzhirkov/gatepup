@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -12,18 +13,15 @@ use crate::health::{build_health_client, run_health_checks};
 use crate::proxy::{build_client, handle, ProxyClient};
 use crate::snapshot::{ListenerRuntime, RuntimeConfig};
 
-/// Bind every listener and serve until Ctrl-C. Returns once all accept loops
-/// have stopped after a shutdown signal.
-pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
+/// Serve all listeners and run active health checks until `shutdown` fires.
+/// Binds synchronously so bind failures surface immediately. The shared
+/// `metrics` are incremented from the request path.
+pub async fn serve(
+    snapshot: Arc<RuntimeConfig>,
+    metrics: Arc<Metrics>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), ProxyError> {
     let client = build_client();
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("shutdown signal received");
-            let _ = shutdown_tx.send(true);
-        }
-    });
 
     let mut handles = Vec::with_capacity(snapshot.listeners.len());
     for listener in &snapshot.listeners {
@@ -41,7 +39,8 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
             listener.clone(),
             snapshot.clone(),
             client.clone(),
-            shutdown_rx.clone(),
+            metrics.clone(),
+            shutdown.clone(),
         )));
     }
 
@@ -55,7 +54,7 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
                 upstream.clone(),
                 settings,
                 health_client.clone(),
-                shutdown_rx.clone(),
+                shutdown.clone(),
             )));
         }
     }
@@ -66,11 +65,29 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
     Ok(())
 }
 
+/// Convenience entry point: build metrics, install a Ctrl-C shutdown, and serve.
+/// Used standalone and in tests; the orchestrated path (with the admin server)
+/// calls [`serve`] directly so it can share metrics and shutdown.
+pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
+    let metrics = Arc::new(Metrics::new().map_err(|e| ProxyError::Metrics(e.to_string()))?);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("shutdown signal received");
+            let _ = shutdown_tx.send(true);
+        }
+    });
+
+    serve(snapshot, metrics, shutdown_rx).await
+}
+
 async fn accept_loop(
     tcp: TcpListener,
     listener: Arc<ListenerRuntime>,
     config: Arc<RuntimeConfig>,
     client: ProxyClient,
+    metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
@@ -81,15 +98,17 @@ async fn accept_loop(
                     let listener = listener.clone();
                     let config = config.clone();
                     let client = client.clone();
+                    let metrics = metrics.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let listener = listener.clone();
                             let config = config.clone();
                             let client = client.clone();
+                            let metrics = metrics.clone();
                             async move {
                                 Ok::<_, Infallible>(
-                                    handle(req, listener, config, client, remote).await,
+                                    handle(req, listener, config, client, metrics, remote).await,
                                 )
                             }
                         });

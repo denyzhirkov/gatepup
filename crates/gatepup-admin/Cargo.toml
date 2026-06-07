@@ -1,11 +1,11 @@
 [package]
-name = "gatepup-proxy"
+name = "gatepup-admin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-gatepup-config.workspace = true
+gatepup-proxy.workspace = true
 gatepup-observability.workspace = true
 tokio.workspace = true
 hyper.workspace = true
@@ -14,14 +14,9 @@ http.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
-tokio.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
-http.workspace = true
-http-body-util.workspace = true
-bytes.workspace = true

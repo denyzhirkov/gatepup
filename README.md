@@ -6,17 +6,19 @@ GatePup is a lightweight, ultra-fast and resilient reverse proxy written in Rust
 It is designed for simple Docker-based deployments, self-hosted apps and small
 production environments where traditional reverse proxies may feel too complex.
 
-> **Status:** MVP in progress (v0.1). The config model, loader, validator and
-> CLI (`validate` / `print-config`) are implemented. The proxy server itself is
-> not wired up yet — `gatepup run` is a placeholder.
+> **Status:** MVP in progress (v0.1). Working today: config model/loader/validator,
+> CLI (`run` / `validate` / `print-config`), HTTP/1.1 reverse proxy with host/path
+> routing, round-robin upstreams, active + passive health checks, structured JSON
+> access logs, Prometheus metrics, and the admin API. Not yet: TLS, WebSocket,
+> retries, hot reload (see roadmap).
 
 ## What it does
 
-- HTTP/1.1 reverse proxy (planned)
+- HTTP/1.1 reverse proxy
 - Host- and path-prefix routing
 - Upstream groups with round-robin load balancing
-- Active and passive health checks
-- Structured JSON logs, Prometheus metrics, admin health endpoint
+- Active and passive health checks (opt-in per upstream)
+- Structured JSON access logs, Prometheus metrics, admin API
 - A single human-readable JSON config
 
 ## What it is *not*
@@ -50,13 +52,27 @@ Config is invalid (2 problem(s)):
 ## CLI
 
 ```bash
-gatepup run          --config ./config.json   # not implemented yet
+gatepup run          --config ./config.json
 gatepup validate     --config ./config.json
 gatepup print-config --config ./config.json
 ```
 
-Logging is controlled by the `GATEPUP_LOG` env var (defaults to `info`) and is
-written to stderr.
+`run` serves the proxy (and the admin server if enabled) until Ctrl-C. Logs are
+structured JSON on stdout; the level comes from `GATEPUP_LOG`, then the config
+`logLevel`, then `info`.
+
+## Admin API & metrics
+
+When `admin.enabled`, GatePup serves read-only management endpoints on
+`admin.bind` (default `127.0.0.1:8080`):
+
+```bash
+curl 127.0.0.1:8080/health             # {"status":"ok","version":"..."}
+curl 127.0.0.1:8080/routes             # routes across all listeners
+curl 127.0.0.1:8080/upstreams          # upstreams with per-target health
+curl 127.0.0.1:8080/config/effective   # the validated effective config
+curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
+```
 
 ## Config
 
