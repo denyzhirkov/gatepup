@@ -1,15 +1,54 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gatepup_config::GatePupConfig;
+use gatepup_config::{GatePupConfig, RetryConfig};
+use http::Method;
 use serde::Serialize;
 
 use crate::error::ProxyError;
 use crate::health::{HealthCheckSettings, HealthState};
 use crate::router::Router;
+
+/// Parsed retry policy for an upstream (only present when retries are enabled).
+pub(crate) struct RetryPolicy {
+    /// Max total tries (>= 1).
+    pub(crate) max_attempts: u32,
+    methods: HashSet<Method>,
+    pub(crate) on_connect_failure: bool,
+    pub(crate) on_5xx: bool,
+}
+
+impl RetryPolicy {
+    fn from_config(cfg: &RetryConfig) -> Option<Self> {
+        if !cfg.enabled {
+            return None;
+        }
+        let methods = cfg
+            .methods
+            .iter()
+            .filter_map(|m| Method::from_bytes(m.as_bytes()).ok())
+            .collect();
+        let on_connect_failure = cfg
+            .retry_on
+            .iter()
+            .any(|c| c == "connect_error" || c == "connect_timeout");
+        let on_5xx = cfg.retry_on.iter().any(|c| c == "upstream_5xx");
+        Some(Self {
+            max_attempts: cfg.attempts.max(1),
+            methods,
+            on_connect_failure,
+            on_5xx,
+        })
+    }
+
+    /// Whether this method is eligible for retries (so its body may be buffered).
+    pub(crate) fn allows_method(&self, method: &Method) -> bool {
+        self.methods.contains(method)
+    }
+}
 
 /// Immutable runtime view of the configuration. Built once and shared via
 /// `Arc`; request handling never mutates it (target health uses interior
@@ -33,6 +72,8 @@ pub(crate) struct UpstreamRuntime {
     pub(crate) targets: Vec<TargetRuntime>,
     /// Active-health settings when health management is enabled for this upstream.
     pub(crate) health: Option<HealthCheckSettings>,
+    /// Retry policy when retries are enabled for this upstream.
+    pub(crate) retry: Option<RetryPolicy>,
     /// Precomputed weighted schedule: target indices, each appearing in
     /// proportion to its weight (gcd-reduced, interleaved). Equal weights reduce
     /// to plain round-robin. Indexed lock-free via `next`.
@@ -232,6 +273,7 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
             Arc::new(UpstreamRuntime {
                 targets,
                 health: settings,
+                retry: upstream.retries.as_ref().and_then(RetryPolicy::from_config),
                 schedule,
                 next: AtomicUsize::new(0),
             }),
@@ -278,6 +320,7 @@ mod tests {
                 })
                 .collect(),
             health: None,
+            retry: None,
             schedule: build_schedule(weights),
             next: AtomicUsize::new(0),
         }
@@ -355,6 +398,34 @@ mod tests {
         assert_eq!(a + b, 400);
         assert_eq!(a, 300, "target a should get 3/4 of traffic");
         assert_eq!(b, 100, "target b should get 1/4 of traffic");
+    }
+
+    #[test]
+    fn retry_policy_parses_methods_and_conditions() {
+        let cfg = RetryConfig {
+            enabled: true,
+            attempts: 3,
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            retry_on: vec!["connect_timeout".to_string(), "upstream_5xx".to_string()],
+        };
+        let policy = RetryPolicy::from_config(&cfg).unwrap();
+        assert_eq!(policy.max_attempts, 3);
+        assert!(policy.allows_method(&Method::GET));
+        assert!(policy.allows_method(&Method::POST));
+        assert!(!policy.allows_method(&Method::PUT));
+        assert!(policy.on_connect_failure); // connect_timeout counts
+        assert!(policy.on_5xx);
+    }
+
+    #[test]
+    fn retry_policy_none_when_disabled() {
+        let cfg = RetryConfig {
+            enabled: false,
+            attempts: 2,
+            methods: vec!["GET".to_string()],
+            retry_on: vec!["connect_error".to_string()],
+        };
+        assert!(RetryPolicy::from_config(&cfg).is_none());
     }
 
     #[test]

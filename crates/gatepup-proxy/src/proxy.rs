@@ -5,10 +5,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use http::request::Parts;
 use http::uri::PathAndQuery;
 use http::{Request, Response, StatusCode, Uri};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -18,6 +19,11 @@ use gatepup_observability::Metrics;
 
 use crate::snapshot::{ListenerRuntime, RuntimeConfig};
 use crate::BoxError;
+
+/// Max request body buffered to make a request replayable for retries. Idempotent
+/// methods are normally body-less; larger bodies fall back to a single streamed
+/// attempt (no retry).
+const BODY_BUFFER_CAP: usize = 64 * 1024;
 
 /// Hop-by-hop headers that must not be forwarded to the upstream.
 const HOP_BY_HOP: &[&str] = &[
@@ -31,13 +37,56 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+/// Unified boxed body used for both the response we return and the request we
+/// send upstream (so streamed and buffered request bodies share one client type).
 pub(crate) type ResponseBody = BoxBody<Bytes, BoxError>;
-pub(crate) type ProxyClient = Client<HttpConnector, Incoming>;
+pub(crate) type ProxyClient = Client<HttpConnector, ResponseBody>;
 
 pub(crate) fn build_client(connect_timeout: Duration) -> ProxyClient {
     let mut connector = HttpConnector::new();
     connector.set_connect_timeout(Some(connect_timeout));
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+fn box_incoming(body: Incoming) -> ResponseBody {
+    body.map_err(|e| Box::new(e) as BoxError).boxed()
+}
+
+fn box_bytes(bytes: Bytes) -> ResponseBody {
+    Full::new(bytes).map_err(|never| match never {}).boxed()
+}
+
+/// The request body for an upstream attempt: either a buffered (replayable) body
+/// or a single-shot streamed body that can be sent only once.
+enum BodySource {
+    Buffered(Bytes),
+    Once(Option<Incoming>),
+}
+
+impl BodySource {
+    /// A body for the next attempt: buffered bodies clone; a streamed body is
+    /// yielded once, then `None` (no further attempt possible).
+    fn next(&mut self) -> Option<ResponseBody> {
+        match self {
+            BodySource::Buffered(bytes) => Some(box_bytes(bytes.clone())),
+            BodySource::Once(slot) => slot.take().map(box_incoming),
+        }
+    }
+}
+
+/// Decide whether the request body can be buffered for replay, and produce the
+/// matching [`BodySource`]. Buffering is bounded by [`BODY_BUFFER_CAP`]; bodies
+/// that exceed it (or fail to read) fall back to a single streamed attempt.
+async fn prepare_body_source(body: Incoming, replayable: bool) -> BodySource {
+    if !replayable {
+        return BodySource::Once(Some(body));
+    }
+    match Limited::new(body, BODY_BUFFER_CAP).collect().await {
+        Ok(collected) => BodySource::Buffered(collected.to_bytes()),
+        // Over the cap or a read error: can't safely replay, and the original
+        // body is now consumed — surface as a single (already-consumed) attempt.
+        Err(_) => BodySource::Once(None),
+    }
 }
 
 /// Per-request failure that maps to a specific HTTP status + JSON error body.
@@ -93,21 +142,31 @@ pub(crate) async fn handle(
     let path = req.uri().path().to_string();
 
     metrics.inc_requests();
-    let (response, route, upstream) =
-        match forward(req, &listener, &config, &client, &host, remote, &request_id).await {
-            Ok(f) => {
-                metrics.inc_upstream_requests();
-                (f.response, Some(f.route), Some(f.upstream))
+    let (response, route, upstream) = match forward(
+        req,
+        &listener,
+        &config,
+        &client,
+        &metrics,
+        &host,
+        remote,
+        &request_id,
+    )
+    .await
+    {
+        Ok(f) => {
+            metrics.inc_upstream_requests();
+            (f.response, Some(f.route), Some(f.upstream))
+        }
+        Err(err) => {
+            if matches!(err, GatewayError::RouteNotFound) {
+                metrics.inc_route_not_found();
+            } else {
+                metrics.inc_upstream_errors();
             }
-            Err(err) => {
-                if matches!(err, GatewayError::RouteNotFound) {
-                    metrics.inc_route_not_found();
-                } else {
-                    metrics.inc_upstream_errors();
-                }
-                (error_response(err, &request_id), None, None)
-            }
-        };
+            (error_response(err, &request_id), None, None)
+        }
+    };
 
     metrics.observe_duration(started.elapsed().as_secs_f64());
     tracing::info!(
@@ -130,6 +189,7 @@ async fn forward(
     listener: &ListenerRuntime,
     config: &RuntimeConfig,
     client: &ProxyClient,
+    metrics: &Metrics,
     host: &str,
     remote: SocketAddr,
     request_id: &str,
@@ -144,46 +204,107 @@ async fn forward(
         .upstreams
         .get(&route.upstream)
         .ok_or(GatewayError::UpstreamMissing)?;
-    let target = upstream
-        .pick_target()
-        .ok_or(GatewayError::NoHealthyUpstream)?;
 
-    let upstream_req = build_upstream_request(req, &target.url, host, remote, request_id)
-        .map_err(|_| GatewayError::BadGateway)?;
+    let (mut parts, body) = req.into_parts();
+    let method = parts.method.clone();
+    let original_uri = parts.uri.clone();
+    rewrite_headers(&mut parts.headers, host, remote.ip(), request_id);
 
-    // Passive health: feed each proxied outcome into the target's health state.
-    // Connect error / timeout / 5xx count as failures; anything else succeeds.
-    match tokio::time::timeout(config.request_timeout, client.request(upstream_req)).await {
-        Err(_elapsed) => {
-            target.state.observe(false);
-            Err(GatewayError::UpstreamTimeout)
+    // The body is buffered for replay only when retries are enabled for an
+    // eligible method and the body fits the cap; otherwise it streams once.
+    let replayable = match upstream.retry.as_ref() {
+        Some(policy) if policy.max_attempts > 1 && policy.allows_method(&method) => {
+            content_length(&parts.headers).is_none_or(|len| len <= BODY_BUFFER_CAP)
         }
-        Ok(Err(_)) => {
-            target.state.observe(false);
-            Err(GatewayError::UpstreamConnect)
-        }
-        Ok(Ok(resp)) => {
-            target.state.observe(resp.status().as_u16() < 500);
-            Ok(Forwarded {
-                response: resp.map(|body| body.map_err(|e| Box::new(e) as BoxError).boxed()),
-                route: route_name,
-                upstream: upstream_name,
-            })
+        _ => false,
+    };
+    let mut body_source = prepare_body_source(body, replayable).await;
+
+    // Retries only when the body is replayable; otherwise a single attempt.
+    let policy = upstream.retry.as_ref();
+    let max_attempts = match policy {
+        Some(p) if replayable => p.max_attempts,
+        _ => 1,
+    };
+
+    let mut last_err = GatewayError::NoHealthyUpstream;
+    for attempt in 0..max_attempts {
+        let Some(target) = upstream.pick_target() else {
+            last_err = GatewayError::NoHealthyUpstream;
+            break;
+        };
+        // A streamed (non-replayable) body can only be sent once.
+        let Some(body) = body_source.next() else {
+            break;
+        };
+        let Some(upstream_req) = build_attempt_request(&parts, &original_uri, &target.url, body)
+        else {
+            return Err(GatewayError::BadGateway);
+        };
+        let is_last = attempt + 1 == max_attempts;
+
+        // Passive health: feed each proxied outcome into the target's state.
+        match tokio::time::timeout(config.request_timeout, client.request(upstream_req)).await {
+            // Overall request timeout is NOT retried (the backend may have
+            // already processed the request).
+            Err(_elapsed) => {
+                target.state.observe(false);
+                return Err(GatewayError::UpstreamTimeout);
+            }
+            Ok(Err(_)) => {
+                target.state.observe(false);
+                last_err = GatewayError::UpstreamConnect;
+                let retry = policy.is_some_and(|p| p.on_connect_failure);
+                if is_last || !retry {
+                    return Err(last_err);
+                }
+                metrics.inc_upstream_retries();
+            }
+            Ok(Ok(resp)) => {
+                let status = resp.status().as_u16();
+                target.state.observe(status < 500);
+                let retry_5xx = status >= 500 && policy.is_some_and(|p| p.on_5xx);
+                if status < 500 || is_last || !retry_5xx {
+                    return Ok(Forwarded {
+                        response: resp.map(box_incoming),
+                        route: route_name,
+                        upstream: upstream_name,
+                    });
+                }
+                metrics.inc_upstream_retries();
+            }
         }
     }
+
+    Err(last_err)
 }
 
-fn build_upstream_request(
-    req: Request<Incoming>,
+/// Build one upstream request for `target_url` from the rewritten parts template.
+/// Headers are cloned per attempt; extensions are intentionally dropped.
+fn build_attempt_request(
+    template: &Parts,
+    original_uri: &Uri,
     target_url: &str,
-    fwd_host: &str,
-    remote: SocketAddr,
-    request_id: &str,
-) -> Result<Request<Incoming>, ()> {
-    let (mut parts, body) = req.into_parts();
-    parts.uri = build_upstream_uri(target_url, &parts.uri)?;
-    rewrite_headers(&mut parts.headers, fwd_host, remote.ip(), request_id);
-    Ok(Request::from_parts(parts, body))
+    body: ResponseBody,
+) -> Option<Request<ResponseBody>> {
+    let uri = build_upstream_uri(target_url, original_uri).ok()?;
+    let mut builder = Request::builder()
+        .method(template.method.clone())
+        .uri(uri)
+        .version(template.version);
+    if let Some(headers) = builder.headers_mut() {
+        *headers = template.headers.clone();
+    }
+    builder.body(body).ok()
+}
+
+fn content_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// Strip hop-by-hop and Host headers, then set the forwarding headers. Pure

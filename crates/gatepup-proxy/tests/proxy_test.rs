@@ -6,9 +6,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use gatepup_config::{
     AppConfig, GatePupConfig, HealthCheckConfig, ListenerConfig, MatchConfig, Protocol,
-    RouteConfig, TargetConfig, UpstreamConfig,
+    RetryConfig, RouteConfig, TargetConfig, UpstreamConfig,
 };
 use gatepup_observability::Metrics;
+use http::Method;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
@@ -276,11 +277,65 @@ fn client() -> Client<HttpConnector, Full<Bytes>> {
 }
 
 async fn get(port: u16) -> Response<hyper::body::Incoming> {
+    request_method(port, Method::GET).await
+}
+
+async fn request_method(port: u16, method: Method) -> Response<hyper::body::Incoming> {
     let req = Request::builder()
+        .method(method)
         .uri(format!("http://127.0.0.1:{port}/"))
         .body(Full::new(Bytes::new()))
         .unwrap();
     client().request(req).await.unwrap()
+}
+
+/// A backend that always answers `500`.
+async fn spawn_500_backend() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| async move {
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(500)
+                            .body(Full::new(Bytes::from_static(b"err")))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    port
+}
+
+/// Config with two ordered targets (first is tried first) and a retry policy.
+fn config_retries(proxy_port: u16, target_ports: &[u16], retry: RetryConfig) -> GatePupConfig {
+    let mut cfg = config(proxy_port, None, target_ports[0]);
+    cfg.upstreams[0].targets = target_ports
+        .iter()
+        .map(|p| TargetConfig {
+            url: format!("http://127.0.0.1:{p}"),
+            weight: 1,
+        })
+        .collect();
+    cfg.upstreams[0].retries = Some(retry);
+    cfg
+}
+
+fn retry_policy(methods: &[&str], retry_on: &[&str], attempts: u32) -> RetryConfig {
+    RetryConfig {
+        enabled: true,
+        attempts,
+        methods: methods.iter().map(|m| m.to_string()).collect(),
+        retry_on: retry_on.iter().map(|c| c.to_string()).collect(),
+    }
 }
 
 #[tokio::test]
@@ -422,6 +477,95 @@ async fn weighted_round_robin_distributes_by_weight() {
     // 3:1 over 80 requests (schedule length 4) is deterministic.
     assert_eq!(heavy_hits, 60, "heavy should get 3/4");
     assert_eq!(light_hits, 20, "light should get 1/4");
+}
+
+#[tokio::test]
+async fn retries_connect_failure_onto_next_target() {
+    let dead = free_port(); // target 0: nothing listening -> connect error
+    let healthy = spawn_labeled_backend("B").await; // target 1
+    let proxy_port = free_port();
+    let cfg = config_retries(
+        proxy_port,
+        &[dead, healthy],
+        retry_policy(&["GET"], &["connect_error"], 2),
+    );
+
+    let snapshot = Arc::new(gatepup_proxy::build_snapshot(&cfg).unwrap());
+    let metrics = Arc::new(Metrics::new().unwrap());
+    let (_tx, rx) = watch::channel(false);
+    let _server = tokio::spawn(gatepup_proxy::serve(snapshot, metrics.clone(), rx));
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &body[..],
+        b"B",
+        "should have retried onto the healthy target"
+    );
+    assert!(
+        metrics
+            .encode()
+            .contains("gatepup_upstream_retries_total 1"),
+        "retry counter not incremented"
+    );
+}
+
+#[tokio::test]
+async fn non_idempotent_method_not_retried() {
+    let dead = free_port();
+    let healthy = spawn_labeled_backend("B").await;
+    let proxy_port = free_port();
+    // Retries enabled, but only for GET — a POST must not be retried.
+    spawn_proxy(config_retries(
+        proxy_port,
+        &[dead, healthy],
+        retry_policy(&["GET"], &["connect_error"], 2),
+    ))
+    .await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = request_method(proxy_port, Method::POST).await;
+    assert_eq!(resp.status(), 502, "POST should not be retried");
+}
+
+#[tokio::test]
+async fn retries_on_5xx_onto_next_target() {
+    let failing = spawn_500_backend().await; // target 0 -> 500
+    let healthy = spawn_labeled_backend("B").await; // target 1 -> 200
+    let proxy_port = free_port();
+    spawn_proxy(config_retries(
+        proxy_port,
+        &[failing, healthy],
+        retry_policy(&["GET"], &["upstream_5xx"], 2),
+    ))
+    .await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"B", "should have retried off the 5xx target");
+}
+
+#[tokio::test]
+async fn retries_exhausted_returns_error() {
+    let dead1 = free_port();
+    let dead2 = free_port();
+    let proxy_port = free_port();
+    spawn_proxy(config_retries(
+        proxy_port,
+        &[dead1, dead2],
+        retry_policy(&["GET"], &["connect_error"], 2),
+    ))
+    .await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 502);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("upstream_connect_error"));
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ pub struct Metrics {
     request_duration: Histogram,
     upstream_requests_total: IntCounter,
     upstream_errors_total: IntCounter,
+    upstream_retries_total: IntCounter,
     route_not_found_total: IntCounter,
     upstream_healthy: IntGaugeVec,
 }
@@ -37,6 +38,10 @@ impl Metrics {
             "gatepup_upstream_errors_total",
             "Upstream failures (connect/timeout/5xx mapped to gateway errors)",
         )?;
+        let upstream_retries_total = IntCounter::new(
+            "gatepup_upstream_retries_total",
+            "Upstream attempts that were retried onto another target",
+        )?;
         let route_not_found_total = IntCounter::new(
             "gatepup_route_not_found_total",
             "Requests that matched no route",
@@ -53,6 +58,7 @@ impl Metrics {
         registry.register(Box::new(request_duration.clone()))?;
         registry.register(Box::new(upstream_requests_total.clone()))?;
         registry.register(Box::new(upstream_errors_total.clone()))?;
+        registry.register(Box::new(upstream_retries_total.clone()))?;
         registry.register(Box::new(route_not_found_total.clone()))?;
         registry.register(Box::new(upstream_healthy.clone()))?;
 
@@ -62,6 +68,7 @@ impl Metrics {
             request_duration,
             upstream_requests_total,
             upstream_errors_total,
+            upstream_retries_total,
             route_not_found_total,
             upstream_healthy,
         })
@@ -81,6 +88,10 @@ impl Metrics {
 
     pub fn inc_upstream_errors(&self) {
         self.upstream_errors_total.inc();
+    }
+
+    pub fn inc_upstream_retries(&self) {
+        self.upstream_retries_total.inc();
     }
 
     pub fn inc_route_not_found(&self) {
