@@ -74,6 +74,24 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+## Hot reload
+
+Send `SIGHUP` to reload the config file without dropping connections:
+
+```bash
+kill -HUP $(pidof gatepup)   # or: docker kill --signal=HUP <container>
+```
+
+- The config is re-read, validated, and the routing snapshot is **atomically
+  swapped**. New requests use the new config; in-flight requests finish on the
+  old one.
+- If the new config is invalid (parse or validation error), the **old config is
+  kept** and the proxy keeps serving — a bad reload never takes you down.
+- **What reloads:** routes, upstreams (targets/weights/health/retries), and
+  timeouts. Active health checks are re-spawned for the new upstreams.
+- **What needs a restart:** listener bind addresses and TLS certificates.
+- Each reload increments `gatepup_config_reloads_total{result="success|failure"}`.
+
 ## TLS
 
 GatePup can terminate TLS at a listener (rustls, ring provider). Upstreams stay
