@@ -435,6 +435,72 @@ async fn https_listener_with_missing_cert_fails_to_build() {
     assert!(gatepup_proxy::build_snapshot(&cfg).is_err());
 }
 
+async fn body_of(resp: Response<hyper::body::Incoming>) -> String {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Build a SharedConfig + serve it, returning the shared cell + reload sender so
+/// the test can hot-swap routing.
+async fn spawn_reloadable(cfg: GatePupConfig) -> (gatepup_proxy::SharedConfig, watch::Sender<u64>) {
+    let shared = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        gatepup_proxy::build_snapshot(&cfg).unwrap(),
+    ));
+    let metrics = Arc::new(Metrics::new().unwrap());
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    std::mem::forget(_shutdown_tx); // keep alive for the test's lifetime
+    let (reload_tx, reload_rx) = watch::channel(0u64);
+    let server = shared.clone();
+    tokio::spawn(async move {
+        let _ = gatepup_proxy::serve_shared(server, metrics, shutdown_rx, reload_rx).await;
+    });
+    (shared, reload_tx)
+}
+
+#[tokio::test]
+async fn reload_swaps_routing_for_new_requests() {
+    let backend_a = spawn_labeled_backend("A").await;
+    let backend_b = spawn_labeled_backend("B").await;
+    let proxy_port = free_port();
+
+    let (shared, reload_tx) = spawn_reloadable(config(proxy_port, None, backend_a)).await;
+    wait_until_listening(proxy_port).await;
+    assert_eq!(body_of(get(proxy_port).await).await, "A");
+
+    // Hot-swap routing to backend B.
+    shared.store(std::sync::Arc::new(
+        gatepup_proxy::build_snapshot(&config(proxy_port, None, backend_b)).unwrap(),
+    ));
+    reload_tx.send_modify(|v| *v += 1);
+
+    assert_eq!(body_of(get(proxy_port).await).await, "B");
+}
+
+#[tokio::test]
+async fn reload_does_not_affect_in_flight_requests() {
+    let slow = spawn_slow_backend(500).await; // returns "slow-ok" after ~500ms
+    let fast = spawn_labeled_backend("B").await;
+    let proxy_port = free_port();
+
+    let (shared, reload_tx) = spawn_reloadable(config(proxy_port, None, slow)).await;
+    wait_until_listening(proxy_port).await;
+
+    // Start an in-flight request routed to the slow backend.
+    let in_flight = tokio::spawn(async move { body_of(get(proxy_port).await).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Swap routing to the fast backend mid-flight.
+    shared.store(std::sync::Arc::new(
+        gatepup_proxy::build_snapshot(&config(proxy_port, None, fast)).unwrap(),
+    ));
+    reload_tx.send_modify(|v| *v += 1);
+
+    // New request uses the new routing...
+    assert_eq!(body_of(get(proxy_port).await).await, "B");
+    // ...but the in-flight request still completes against the old target.
+    assert_eq!(in_flight.await.unwrap(), "slow-ok");
+}
+
 #[tokio::test]
 async fn proxies_request_to_backend() {
     let backend_port = spawn_backend().await;

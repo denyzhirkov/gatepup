@@ -174,3 +174,74 @@ fn reload(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn write_config(target_url: &str) -> PathBuf {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let body = format!(
+            r#"{{"app":{{"name":"t"}},"listeners":[{{"name":"l","bind":"127.0.0.1:0","routes":[{{"name":"r","match":{{"pathPrefix":"/"}},"upstream":"u"}}]}}],"upstreams":[{{"name":"u","targets":[{{"url":"{target_url}"}}]}}]}}"#
+        );
+        let path =
+            std::env::temp_dir().join(format!("gatepup-core-{}-{seq}.json", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn shared_from(path: &Path) -> SharedConfig {
+        let cfg = load_validated(path).unwrap();
+        Arc::new(ArcSwap::from_pointee(
+            gatepup_proxy::build_snapshot(&cfg).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn reload_keeps_old_config_on_invalid() {
+        let good = write_config("http://127.0.0.1:1");
+        let shared = shared_from(&good);
+        let before = shared.load_full();
+        let effective = ArcSwap::from_pointee("old".to_string());
+        let metrics = Metrics::new().unwrap();
+        let (tx, _rx) = watch::channel(0u64);
+
+        reload(
+            Path::new("/no/such/gatepup-config.json"),
+            &shared,
+            &effective,
+            &metrics,
+            &tx,
+        );
+
+        assert!(
+            Arc::ptr_eq(&before, &shared.load_full()),
+            "an invalid reload must keep the old snapshot"
+        );
+        assert_eq!(effective.load().as_str(), "old");
+    }
+
+    #[test]
+    fn reload_swaps_snapshot_on_valid() {
+        let a = write_config("http://127.0.0.1:1");
+        let b = write_config("http://127.0.0.1:2");
+        let shared = shared_from(&a);
+        let before = shared.load_full();
+        let effective = ArcSwap::from_pointee("old".to_string());
+        let metrics = Metrics::new().unwrap();
+        let (tx, _rx) = watch::channel(0u64);
+
+        reload(&b, &shared, &effective, &metrics, &tx);
+
+        assert!(
+            !Arc::ptr_eq(&before, &shared.load_full()),
+            "a valid reload must swap the snapshot"
+        );
+        assert!(
+            effective.load().contains("127.0.0.1:2"),
+            "effective config should reflect the reloaded config"
+        );
+    }
+}
