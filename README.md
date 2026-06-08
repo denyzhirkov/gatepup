@@ -166,6 +166,45 @@ stop` shuts down gracefully (SIGTERM drains in-flight requests).
 > the host. The secure default is `127.0.0.1`; don't expose the admin port
 > publicly without auth.
 
+## Configuration via environment
+
+GatePup can run with **no config file** — handy for Docker. The effective config
+is resolved with this precedence (first match wins for the base), then scalar
+overrides are layered on top:
+
+1. `GATEPUP_CONFIG=<path>` — load this file
+2. `GATEPUP_CONFIG_JSON='{...}'` — inline full config JSON
+3. `--config <path>` — CLI flag
+4. **simple mode** — build a single-listener config from env (below)
+
+```bash
+# config-free single listener, round-robins over two upstreams
+GATEPUP_LISTEN=0.0.0.0:8080 \
+GATEPUP_UPSTREAM=http://api-1:4000,http://api-2:4000 \
+GATEPUP_ADMIN=0.0.0.0:9090 GATEPUP_LOG=info \
+gatepup run
+```
+
+| Variable | Effect |
+|---|---|
+| `GATEPUP_CONFIG` | Path to a JSON config file (highest precedence) |
+| `GATEPUP_CONFIG_JSON` | Inline full config JSON |
+| `GATEPUP_LISTEN` | simple mode: listener bind (default `0.0.0.0:8080`) |
+| `GATEPUP_UPSTREAM` | simple mode: comma-separated target URLs (round-robin) |
+| `GATEPUP_ROUTE_HOST` | simple mode: optional host match |
+| `GATEPUP_TLS_CERT` / `GATEPUP_TLS_KEY` | simple mode: enable HTTPS on the listener |
+| `GATEPUP_HEALTHCHECK_PATH` | simple mode: enable active health checks |
+| `GATEPUP_LOG` | override `app.logLevel` |
+| `GATEPUP_ADMIN` | enable admin on this bind |
+| `GATEPUP_METRICS_PATH` | enable metrics at this path |
+| `GATEPUP_TIMEOUT_CONNECT_MS` / `GATEPUP_TIMEOUT_REQUEST_MS` | override timeouts |
+
+Scalar overrides (`GATEPUP_LOG`, `GATEPUP_ADMIN`, `GATEPUP_METRICS_PATH`,
+`GATEPUP_TIMEOUT_*`) apply on top of **any** base source. Malformed values fail
+loud with a named error. The resolved config goes through the same validation as
+a file. Routing topology with multiple listeners/routes stays in the file or
+`GATEPUP_CONFIG_JSON`.
+
 ## Config
 
 See [`config.example.json`](./config.example.json) for a full example. A config
