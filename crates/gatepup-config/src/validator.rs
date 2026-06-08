@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use crate::error::ValidationError;
-use crate::model::{GatePupConfig, HealthCheckConfig};
+use crate::model::{GatePupConfig, HealthCheckConfig, Protocol};
 
 /// Validate a parsed config. Returns every problem found, not just the first,
 /// so the user can fix the whole file in one pass.
@@ -66,6 +66,8 @@ fn check_listeners(
             });
         }
 
+        check_listener_tls(listener, errors);
+
         let mut seen_routes = HashSet::new();
         let mut seen_matches: HashMap<(Option<String>, String), String> = HashMap::new();
         for route in &listener.routes {
@@ -118,6 +120,32 @@ fn check_listeners(
                 });
             }
         }
+    }
+}
+
+fn check_listener_tls(listener: &crate::model::ListenerConfig, errors: &mut Vec<ValidationError>) {
+    match (listener.protocol, &listener.tls) {
+        (Protocol::Https, None) => errors.push(ValidationError::MissingTls {
+            listener: listener.name.clone(),
+        }),
+        (Protocol::Http, Some(_)) => errors.push(ValidationError::UnexpectedTls {
+            listener: listener.name.clone(),
+        }),
+        (_, Some(tls)) => {
+            if tls.cert.is_empty() {
+                errors.push(ValidationError::EmptyTlsPath {
+                    listener: listener.name.clone(),
+                    field: "cert",
+                });
+            }
+            if tls.key.is_empty() {
+                errors.push(ValidationError::EmptyTlsPath {
+                    listener: listener.name.clone(),
+                    field: "key",
+                });
+            }
+        }
+        (Protocol::Http, None) => {}
     }
 }
 
@@ -284,6 +312,7 @@ mod tests {
                 name: "public".to_string(),
                 bind: "0.0.0.0:80".to_string(),
                 protocol: Protocol::Http,
+                tls: None,
                 routes: vec![route("api", "api.example.com", "api")],
             }],
             upstreams: vec![upstream("api", vec![target("http://api-1:4000")])],
@@ -447,6 +476,59 @@ mod tests {
         assert!(errors.contains(&ValidationError::ZeroWeight {
             upstream: "api".to_string(),
             url: "http://api-1:4000".to_string(),
+        }));
+    }
+
+    #[test]
+    fn accepts_https_listener_with_tls() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].protocol = Protocol::Https;
+        cfg.listeners[0].tls = Some(TlsConfig {
+            cert: "/c.pem".to_string(),
+            key: "/k.pem".to_string(),
+        });
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn rejects_https_without_tls() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].protocol = Protocol::Https;
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::MissingTls {
+            listener: "public".to_string(),
+        }));
+    }
+
+    #[test]
+    fn rejects_http_listener_with_tls() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].tls = Some(TlsConfig {
+            cert: "/c.pem".to_string(),
+            key: "/k.pem".to_string(),
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::UnexpectedTls {
+            listener: "public".to_string(),
+        }));
+    }
+
+    #[test]
+    fn rejects_empty_tls_paths() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].protocol = Protocol::Https;
+        cfg.listeners[0].tls = Some(TlsConfig {
+            cert: String::new(),
+            key: String::new(),
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::EmptyTlsPath {
+            listener: "public".to_string(),
+            field: "cert",
+        }));
+        assert!(errors.contains(&ValidationError::EmptyTlsPath {
+            listener: "public".to_string(),
+            field: "key",
         }));
     }
 

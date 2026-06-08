@@ -175,6 +175,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
             name: "test".to_string(),
             bind: format!("127.0.0.1:{proxy_port}"),
             protocol: Protocol::Http,
+            tls: None,
             routes: vec![RouteConfig {
                 name: "r".to_string(),
                 matcher: MatchConfig {
@@ -230,6 +231,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
             name: "test".to_string(),
             bind: format!("127.0.0.1:{proxy_port}"),
             protocol: Protocol::Http,
+            tls: None,
             routes: vec![RouteConfig {
                 name: "r".to_string(),
                 matcher: MatchConfig {

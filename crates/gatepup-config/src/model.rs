@@ -63,6 +63,8 @@ pub struct ListenerConfig {
     pub bind: String,
     #[serde(default)]
     pub protocol: Protocol,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
     pub routes: Vec<RouteConfig>,
 }
 
@@ -71,6 +73,15 @@ pub struct ListenerConfig {
 pub enum Protocol {
     #[default]
     Http,
+    Https,
+}
+
+/// TLS material for an `https` listener: PEM file paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TlsConfig {
+    pub cert: String,
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

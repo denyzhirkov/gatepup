@@ -98,4 +98,16 @@ pub enum ValidationError {
 
     #[error("upstream {upstream:?} has invalid retryOn condition {value:?} (expected: connect_error, connect_timeout, upstream_5xx)")]
     InvalidRetryOn { upstream: String, value: String },
+
+    #[error("listener {listener:?} uses protocol https but has no tls block")]
+    MissingTls { listener: String },
+
+    #[error("listener {listener:?} uses protocol http but has a tls block")]
+    UnexpectedTls { listener: String },
+
+    #[error("listener {listener:?} has an empty tls {field:?} path")]
+    EmptyTlsPath {
+        listener: String,
+        field: &'static str,
+    },
 }

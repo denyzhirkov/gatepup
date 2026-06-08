@@ -34,6 +34,7 @@ fn sample_config() -> GatePupConfig {
             name: "public".to_string(),
             bind: "127.0.0.1:0".to_string(),
             protocol: Protocol::Http,
+            tls: None,
             routes: vec![RouteConfig {
                 name: "api".to_string(),
                 matcher: MatchConfig {
