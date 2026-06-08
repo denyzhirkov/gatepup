@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use crate::error::ValidationError;
@@ -11,6 +11,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
 
     let upstream_names: HashSet<&str> = config.upstreams.iter().map(|u| u.name.as_str()).collect();
 
+    check_app(config, &mut errors);
     check_unique_upstreams(config, &mut errors);
     check_listeners(config, &upstream_names, &mut errors);
     check_upstreams(config, &mut errors);
@@ -21,6 +22,15 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn check_app(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    const LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
+    if !LEVELS.contains(&config.app.log_level.to_ascii_lowercase().as_str()) {
+        errors.push(ValidationError::InvalidLogLevel {
+            value: config.app.log_level.clone(),
+        });
     }
 }
 
@@ -56,6 +66,7 @@ fn check_listeners(
         }
 
         let mut seen_routes = HashSet::new();
+        let mut seen_matches: HashMap<(Option<String>, String), String> = HashMap::new();
         for route in &listener.routes {
             if !seen_routes.insert(route.name.as_str()) {
                 errors.push(ValidationError::DuplicateRouteName {
@@ -69,6 +80,34 @@ fn check_listeners(
                     listener: listener.name.clone(),
                     route: route.name.clone(),
                 });
+            }
+
+            if let Some(prefix) = &route.matcher.path_prefix {
+                if !prefix.is_empty() && !prefix.starts_with('/') {
+                    errors.push(ValidationError::InvalidPathPrefix {
+                        listener: listener.name.clone(),
+                        route: route.name.clone(),
+                        prefix: prefix.clone(),
+                    });
+                }
+            }
+
+            // Two routes with the same effective (host, path prefix) are ambiguous.
+            let effective_prefix = route
+                .matcher
+                .path_prefix
+                .clone()
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "/".to_string());
+            let key = (route.matcher.host.clone(), effective_prefix);
+            if let Some(first) = seen_matches.get(&key) {
+                errors.push(ValidationError::ConflictingRoutes {
+                    listener: listener.name.clone(),
+                    first: first.clone(),
+                    second: route.name.clone(),
+                });
+            } else {
+                seen_matches.insert(key, route.name.clone());
             }
 
             if !upstream_names.contains(route.upstream.as_str()) {
@@ -302,6 +341,50 @@ mod tests {
                 interval_ms: 1000,
             })
         );
+    }
+
+    #[test]
+    fn rejects_invalid_log_level() {
+        let mut cfg = valid_config();
+        cfg.app.log_level = "verbose".to_string();
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidLogLevel {
+            value: "verbose".to_string(),
+        }));
+    }
+
+    #[test]
+    fn accepts_log_level_case_insensitively() {
+        let mut cfg = valid_config();
+        cfg.app.log_level = "INFO".to_string();
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn rejects_path_prefix_without_leading_slash() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].matcher.path_prefix = Some("api".to_string());
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidPathPrefix {
+            listener: "public".to_string(),
+            route: "api".to_string(),
+            prefix: "api".to_string(),
+        }));
+    }
+
+    #[test]
+    fn rejects_conflicting_routes_with_same_match() {
+        let mut cfg = valid_config();
+        // Second route, different name, identical host + path prefix.
+        cfg.listeners[0]
+            .routes
+            .push(route("api2", "api.example.com", "api"));
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::ConflictingRoutes {
+            listener: "public".to_string(),
+            first: "api".to_string(),
+            second: "api2".to_string(),
+        }));
     }
 
     #[test]

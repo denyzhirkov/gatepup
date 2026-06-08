@@ -66,4 +66,21 @@ pub enum ValidationError {
 
     #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
     ZeroWeight { upstream: String, url: String },
+
+    #[error("invalid logLevel {value:?} (expected one of: trace, debug, info, warn, error, off)")]
+    InvalidLogLevel { value: String },
+
+    #[error("route {route:?} in listener {listener:?} has pathPrefix {prefix:?} that must start with '/'")]
+    InvalidPathPrefix {
+        listener: String,
+        route: String,
+        prefix: String,
+    },
+
+    #[error("routes {first:?} and {second:?} in listener {listener:?} have the same match (host + path prefix)")]
+    ConflictingRoutes {
+        listener: String,
+        first: String,
+        second: String,
+    },
 }
