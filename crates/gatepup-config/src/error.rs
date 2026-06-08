@@ -19,6 +19,22 @@ pub enum ConfigError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("failed to parse GATEPUP_CONFIG_JSON: {source}")]
+    ParseInline {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("no config source: set --config, GATEPUP_CONFIG, GATEPUP_CONFIG_JSON, or GATEPUP_LISTEN/GATEPUP_UPSTREAM")]
+    NoConfigSource,
+
+    #[error("environment variable {var} has an invalid value {value:?}: {reason}")]
+    BadEnvValue {
+        var: &'static str,
+        value: String,
+        reason: &'static str,
+    },
 }
 
 /// A single, user-facing config validation problem. Messages name the

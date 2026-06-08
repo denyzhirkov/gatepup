@@ -7,6 +7,7 @@
 mod error;
 mod loader;
 mod model;
+mod resolve;
 mod validator;
 
 pub use error::{ConfigError, ValidationError};
@@ -16,4 +17,5 @@ pub use model::{
     MatchConfig, MetricsConfig, Protocol, RetryConfig, RouteConfig, TargetConfig, TimeoutConfig,
     TlsConfig, UpstreamConfig,
 };
+pub use resolve::{resolve_config, ConfigSource};
 pub use validator::validate;
