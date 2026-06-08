@@ -8,6 +8,7 @@ use gatepup_config::{
     AppConfig, GatePupConfig, HealthCheckConfig, ListenerConfig, MatchConfig, Protocol,
     RouteConfig, TargetConfig, UpstreamConfig,
 };
+use gatepup_observability::Metrics;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
@@ -16,6 +17,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -35,6 +37,29 @@ async fn spawn_backend() -> u16 {
                 let io = TokioIo::new(stream);
                 let service = service_fn(|_req| async {
                     Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"backend-ok"))))
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    port
+}
+
+/// A backend that waits `delay_ms` before answering `200 slow-ok`. Used to keep
+/// a request reliably in-flight while a shutdown is triggered.
+async fn spawn_slow_backend(delay_ms: u64) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"slow-ok"))))
                 });
                 let _ = http1::Builder::new().serve_connection(io, service).await;
             });
@@ -328,6 +353,35 @@ async fn active_checks_eject_then_recover() {
     // Flip backend healthy → active probe recovers it → 200.
     healthy.store(true, Ordering::Relaxed);
     wait_for_status(proxy_port, 200, "after recovery").await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_drains_in_flight_request() {
+    let backend_port = spawn_slow_backend(500).await;
+    let proxy_port = free_port();
+    let snapshot =
+        Arc::new(gatepup_proxy::build_snapshot(&config(proxy_port, None, backend_port)).unwrap());
+    let metrics = Arc::new(Metrics::new().unwrap());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let server = tokio::spawn(gatepup_proxy::serve(snapshot, metrics, shutdown_rx));
+    wait_until_listening(proxy_port).await;
+
+    // Start a request that will be in-flight for ~500ms.
+    let in_flight = tokio::spawn(async move { get(proxy_port).await.status().as_u16() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Trigger shutdown while the request is still being served.
+    shutdown_tx.send(true).unwrap();
+
+    // The in-flight request must still complete successfully (drained, not cut).
+    let status = in_flight.await.unwrap();
+    assert_eq!(status, 200, "in-flight request was severed by shutdown");
+
+    // serve() returns once draining completes, well within the grace window.
+    let served = tokio::time::timeout(Duration::from_secs(5), server).await;
+    assert!(served.is_ok(), "serve did not return after shutdown");
+    assert!(served.unwrap().unwrap().is_ok(), "serve returned an error");
 }
 
 #[tokio::test]

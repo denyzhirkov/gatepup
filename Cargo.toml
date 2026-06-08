@@ -7,6 +7,7 @@ members = [
     "crates/gatepup-observability",
     "crates/gatepup-admin",
     "crates/gatepup-cli",
+    "crates/gatepup-bench",
 ]
 
 [workspace.package]
@@ -26,7 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "tokio"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "server-graceful", "http1", "tokio"] }
 http = "1"
 http-body-util = "0.1"
 bytes = "1"

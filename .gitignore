@@ -4,9 +4,19 @@
 *.pdb
 
 # kungfu — generated index is local, config is kept
-/.kungfu/index/
+.kungfu
 
 # Env / local
 .env
 .env.*
 !.env.example
+
+# VSCode
+.vscode
+
+# Claude
+.claude
+CLAUDE.md
+
+# TSK
+.tsk

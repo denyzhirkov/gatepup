@@ -19,6 +19,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
+gatepup-observability.workspace = true
 tokio.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

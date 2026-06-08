@@ -231,6 +231,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gatepup-bench"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "tokio",
+]
+
+[[package]]
 name = "gatepup-cli"
 version = "0.1.0"
 dependencies = [

@@ -1,12 +1,18 @@
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+
+/// Max time to drain in-flight connections after a shutdown signal before
+/// forcing exit. Bounds shutdown so a stuck connection can't hang forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 use crate::error::ProxyError;
 use crate::health::{build_health_client, run_health_checks};
@@ -90,6 +96,8 @@ async fn accept_loop(
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let graceful = GracefulShutdown::new();
+
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -99,26 +107,39 @@ async fn accept_loop(
                     let config = config.clone();
                     let client = client.clone();
                     let metrics = metrics.clone();
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| {
+                        let listener = listener.clone();
+                        let config = config.clone();
+                        let client = client.clone();
+                        let metrics = metrics.clone();
+                        async move {
+                            Ok::<_, Infallible>(
+                                handle(req, listener, config, client, metrics, remote).await,
+                            )
+                        }
+                    });
+                    let conn = http1::Builder::new().serve_connection(io, service);
+                    let watched = graceful.watch(conn);
                     tokio::spawn(async move {
-                        let io = TokioIo::new(stream);
-                        let service = service_fn(move |req| {
-                            let listener = listener.clone();
-                            let config = config.clone();
-                            let client = client.clone();
-                            let metrics = metrics.clone();
-                            async move {
-                                Ok::<_, Infallible>(
-                                    handle(req, listener, config, client, metrics, remote).await,
-                                )
-                            }
-                        });
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        if let Err(err) = watched.await {
                             tracing::debug!(error = %err, "connection closed with error");
                         }
                     });
                 }
                 Err(err) => tracing::warn!(error = %err, "accept failed"),
             },
+        }
+    }
+
+    // Stop accepting, then drain in-flight connections (bounded by DRAIN_TIMEOUT).
+    drop(tcp);
+    tokio::select! {
+        _ = graceful.shutdown() => {
+            tracing::info!(listener = %listener.name, "drained in-flight connections");
+        }
+        _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
+            tracing::warn!(listener = %listener.name, "drain timed out, forcing shutdown");
         }
     }
 }
