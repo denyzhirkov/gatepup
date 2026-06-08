@@ -11,6 +11,7 @@ mod proxy;
 mod router;
 mod server;
 mod snapshot;
+mod tls;
 
 pub use error::ProxyError;
 pub use server::{run, serve};

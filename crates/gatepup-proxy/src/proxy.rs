@@ -140,6 +140,11 @@ pub(crate) async fn handle(
     let host = request_host(&req);
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let scheme = if listener.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
 
     metrics.inc_requests();
     let (response, route, upstream) = match forward(
@@ -149,6 +154,7 @@ pub(crate) async fn handle(
         &client,
         &metrics,
         &host,
+        scheme,
         remote,
         &request_id,
     )
@@ -191,6 +197,7 @@ async fn forward(
     client: &ProxyClient,
     metrics: &Metrics,
     host: &str,
+    scheme: &str,
     remote: SocketAddr,
     request_id: &str,
 ) -> Result<Forwarded, GatewayError> {
@@ -208,7 +215,7 @@ async fn forward(
     let (mut parts, body) = req.into_parts();
     let method = parts.method.clone();
     let original_uri = parts.uri.clone();
-    rewrite_headers(&mut parts.headers, host, remote.ip(), request_id);
+    rewrite_headers(&mut parts.headers, host, scheme, remote.ip(), request_id);
 
     // The body is buffered for replay only when retries are enabled for an
     // eligible method and the body fits the cap; otherwise it streams once.
@@ -309,7 +316,13 @@ fn content_length(headers: &HeaderMap) -> Option<usize> {
 
 /// Strip hop-by-hop and Host headers, then set the forwarding headers. Pure
 /// over a `HeaderMap` so it can be exercised directly in tests.
-fn rewrite_headers(headers: &mut HeaderMap, fwd_host: &str, remote: IpAddr, request_id: &str) {
+fn rewrite_headers(
+    headers: &mut HeaderMap,
+    fwd_host: &str,
+    scheme: &str,
+    remote: IpAddr,
+    request_id: &str,
+) {
     for name in HOP_BY_HOP {
         headers.remove(*name);
     }
@@ -317,7 +330,7 @@ fn rewrite_headers(headers: &mut HeaderMap, fwd_host: &str, remote: IpAddr, requ
 
     append_forwarded_for(headers, remote);
     set_header(headers, "x-forwarded-host", fwd_host);
-    set_header(headers, "x-forwarded-proto", "http");
+    set_header(headers, "x-forwarded-proto", scheme);
     set_header(headers, "x-request-id", request_id);
 }
 
@@ -467,7 +480,7 @@ mod tests {
             HeaderValue::from_static("yes"),
         );
 
-        rewrite_headers(&mut headers, "gatepup.local", ip(), "rid-1");
+        rewrite_headers(&mut headers, "gatepup.local", "http", ip(), "rid-1");
 
         assert!(headers.get(header::HOST).is_none());
         assert!(headers.get(header::CONNECTION).is_none());
@@ -480,11 +493,11 @@ mod tests {
     #[test]
     fn rewrite_headers_sets_forwarding_headers() {
         let mut headers = HeaderMap::new();
-        rewrite_headers(&mut headers, "api.example.com", ip(), "rid-2");
+        rewrite_headers(&mut headers, "api.example.com", "https", ip(), "rid-2");
 
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "203.0.113.7");
         assert_eq!(headers.get("x-forwarded-host").unwrap(), "api.example.com");
-        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "http");
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
         assert_eq!(headers.get("x-request-id").unwrap(), "rid-2");
     }
 
@@ -495,7 +508,7 @@ mod tests {
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("198.51.100.1"),
         );
-        rewrite_headers(&mut headers, "h", ip(), "rid-3");
+        rewrite_headers(&mut headers, "h", "http", ip(), "rid-3");
         assert_eq!(
             headers.get("x-forwarded-for").unwrap(),
             "198.51.100.1, 203.0.113.7"

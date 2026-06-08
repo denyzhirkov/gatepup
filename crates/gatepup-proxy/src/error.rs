@@ -20,4 +20,7 @@ pub enum ProxyError {
 
     #[error("failed to initialize metrics: {0}")]
     Metrics(String),
+
+    #[error("listener {listener:?} TLS setup failed: {message}")]
+    Tls { listener: String, message: String },
 }

@@ -14,6 +14,9 @@ use tokio::sync::watch;
 /// forcing exit. Bounds shutdown so a stuck connection can't hang forever.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Max time for a TLS handshake before the connection is dropped.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 use crate::error::ProxyError;
 use crate::health::{build_health_client, run_health_checks};
 use crate::proxy::{build_client, handle, ProxyClient};
@@ -103,13 +106,12 @@ async fn accept_loop(
             _ = shutdown.changed() => break,
             accepted = tcp.accept() => match accepted {
                 Ok((stream, remote)) => {
-                    let listener = listener.clone();
+                    let svc_listener = listener.clone();
                     let config = config.clone();
                     let client = client.clone();
                     let metrics = metrics.clone();
-                    let io = TokioIo::new(stream);
                     let service = service_fn(move |req| {
-                        let listener = listener.clone();
+                        let listener = svc_listener.clone();
                         let config = config.clone();
                         let client = client.clone();
                         let metrics = metrics.clone();
@@ -119,13 +121,48 @@ async fn accept_loop(
                             )
                         }
                     });
-                    let conn = http1::Builder::new().serve_connection(io, service);
-                    let watched = graceful.watch(conn);
-                    tokio::spawn(async move {
-                        if let Err(err) = watched.await {
-                            tracing::debug!(error = %err, "connection closed with error");
+
+                    match &listener.tls {
+                        // TLS: complete the handshake (bounded) before serving so the
+                        // connection joins the graceful-drain set. Handshakes run on the
+                        // accept loop for now — offloading them is a hardening follow-up.
+                        Some(acceptor) => {
+                            let tls = match tokio::time::timeout(
+                                HANDSHAKE_TIMEOUT,
+                                acceptor.accept(stream),
+                            )
+                            .await
+                            {
+                                Ok(Ok(tls)) => tls,
+                                Ok(Err(err)) => {
+                                    tracing::debug!(error = %err, "tls handshake failed");
+                                    continue;
+                                }
+                                Err(_) => {
+                                    tracing::debug!("tls handshake timed out");
+                                    continue;
+                                }
+                            };
+                            let conn = http1::Builder::new()
+                                .serve_connection(TokioIo::new(tls), service);
+                            let watched = graceful.watch(conn);
+                            tokio::spawn(async move {
+                                if let Err(err) = watched.await {
+                                    tracing::debug!(error = %err, "connection closed with error");
+                                }
+                            });
                         }
-                    });
+                        None => {
+                            let conn = http1::Builder::new()
+                                .serve_connection(TokioIo::new(stream), service);
+                            let watched = graceful.watch(conn);
+                            tokio::spawn(async move {
+                                if let Err(err) = watched.await {
+                                    tracing::debug!(error = %err, "connection closed with error");
+                                }
+                            });
+                        }
+                    }
                 }
                 Err(err) => tracing::warn!(error = %err, "accept failed"),
             },

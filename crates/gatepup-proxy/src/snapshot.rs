@@ -7,6 +7,7 @@ use std::time::Duration;
 use gatepup_config::{GatePupConfig, RetryConfig};
 use http::Method;
 use serde::Serialize;
+use tokio_rustls::TlsAcceptor;
 
 use crate::error::ProxyError;
 use crate::health::{HealthCheckSettings, HealthState};
@@ -66,6 +67,8 @@ pub(crate) struct ListenerRuntime {
     pub(crate) name: String,
     pub(crate) bind: SocketAddr,
     pub(crate) router: Router,
+    /// TLS acceptor when this is an `https` listener; `None` for plain HTTP.
+    pub(crate) tls: Option<TlsAcceptor>,
 }
 
 pub(crate) struct UpstreamRuntime {
@@ -286,10 +289,20 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
             name: listener.name.clone(),
             bind: listener.bind.clone(),
         })?;
+        let tls = match &listener.tls {
+            Some(cfg) => Some(
+                crate::tls::build_acceptor(cfg).map_err(|e| ProxyError::Tls {
+                    listener: listener.name.clone(),
+                    message: e.to_string(),
+                })?,
+            ),
+            None => None,
+        };
         listeners.push(Arc::new(ListenerRuntime {
             name: listener.name.clone(),
             bind,
             router: Router::build(&listener.routes),
+            tls,
         }));
     }
 

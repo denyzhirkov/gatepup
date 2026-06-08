@@ -16,11 +16,14 @@ bytes.workspace = true
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
 gatepup-observability.workspace = true
 tokio.workspace = true
+rcgen.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http.workspace = true
