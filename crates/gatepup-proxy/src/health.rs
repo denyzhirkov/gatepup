@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::snapshot::UpstreamRuntime;
+use crate::SharedConfig;
 
 pub(crate) type HealthClient = Client<HttpConnector, Empty<Bytes>>;
 
@@ -108,19 +109,22 @@ pub(crate) fn build_health_client(connect_timeout: Duration) -> HealthClient {
 }
 
 /// Background active-health loop for one upstream. Probes every target each
-/// interval and feeds the result into its [`HealthState`]. Stops on shutdown.
-pub(crate) async fn run_health_checks(
+/// interval and feeds the result into its [`HealthState`]. Stops on the global
+/// `shutdown` or this generation's `gen_stop` (fired when config is reloaded).
+async fn run_health_checks(
     upstream_name: String,
     upstream: Arc<UpstreamRuntime>,
     settings: HealthCheckSettings,
     client: HealthClient,
     mut shutdown: watch::Receiver<bool>,
+    mut gen_stop: watch::Receiver<bool>,
 ) {
     let mut ticker = interval(settings.interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
+            _ = gen_stop.changed() => break,
             _ = ticker.tick() => {
                 for target in &upstream.targets {
                     let ok = probe(&client, &target.url, &settings.path, settings.timeout).await;
@@ -134,6 +138,54 @@ pub(crate) async fn run_health_checks(
                 }
             }
         }
+    }
+}
+
+/// Supervise active health checks across config reloads. Spawns a health loop
+/// per opted-in upstream for the current snapshot; on `reload`, stops the old
+/// generation and respawns from the new snapshot. Stops all on `shutdown`.
+pub(crate) async fn run_health_supervisor(
+    shared: SharedConfig,
+    connect_timeout: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    mut reload: watch::Receiver<u64>,
+) {
+    let client = build_health_client(connect_timeout);
+    let mut gen_stop: Option<watch::Sender<bool>> = None;
+
+    loop {
+        // Stop the previous generation, then (re)spawn for the current snapshot.
+        if let Some(stop) = gen_stop.take() {
+            let _ = stop.send(true);
+        }
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let snapshot = shared.load_full();
+        for (name, upstream) in &snapshot.upstreams {
+            if let Some(settings) = upstream.health.clone() {
+                tracing::info!(upstream = %name, "active health checks enabled");
+                tokio::spawn(run_health_checks(
+                    name.clone(),
+                    upstream.clone(),
+                    settings,
+                    client.clone(),
+                    shutdown.clone(),
+                    stop_rx.clone(),
+                ));
+            }
+        }
+        gen_stop = Some(stop_tx);
+
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            result = reload.changed() => {
+                if result.is_err() {
+                    break; // reload sender dropped
+                }
+            }
+        }
+    }
+    if let Some(stop) = gen_stop.take() {
+        let _ = stop.send(true);
     }
 }
 

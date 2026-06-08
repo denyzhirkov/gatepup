@@ -20,7 +20,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::error::ProxyError;
-use crate::health::{build_health_client, run_health_checks};
+use crate::health::run_health_supervisor;
 use crate::proxy::{build_client, handle, ProxyClient};
 use crate::snapshot::RuntimeConfig;
 use crate::SharedConfig;
@@ -32,16 +32,27 @@ pub async fn serve(
     metrics: Arc<Metrics>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
-    serve_shared(Arc::new(ArcSwap::from(snapshot)), metrics, shutdown).await
+    // No reload trigger; the sender stays alive for the duration of serve_shared.
+    let (_reload_tx, reload_rx) = watch::channel(0u64);
+    serve_shared(
+        Arc::new(ArcSwap::from(snapshot)),
+        metrics,
+        shutdown,
+        reload_rx,
+    )
+    .await
 }
 
 /// Serve from a shared, swappable snapshot. Listener bind addresses and TLS
 /// acceptors are fixed from the initial snapshot; routing/upstreams are read
 /// from the current snapshot per request, so a reload takes effect immediately.
+/// A health supervisor (re)spawns active checks across reloads, driven by
+/// `reload` (bumped after a successful swap).
 pub async fn serve_shared(
     shared: SharedConfig,
     metrics: Arc<Metrics>,
     shutdown: watch::Receiver<bool>,
+    reload: watch::Receiver<u64>,
 ) -> Result<(), ProxyError> {
     let snapshot = shared.load_full();
     let client = build_client(snapshot.connect_timeout);
@@ -68,21 +79,14 @@ pub async fn serve_shared(
         )));
     }
 
-    // Active health checks for upstreams that opted in (from the initial
-    // snapshot; reload-time health lifecycle is handled by the reload path).
-    let health_client = build_health_client(snapshot.connect_timeout);
-    for (name, upstream) in &snapshot.upstreams {
-        if let Some(settings) = upstream.health.clone() {
-            tracing::info!(upstream = %name, "active health checks enabled");
-            handles.push(tokio::spawn(run_health_checks(
-                name.clone(),
-                upstream.clone(),
-                settings,
-                health_client.clone(),
-                shutdown.clone(),
-            )));
-        }
-    }
+    // Active health checks are managed by a supervisor that respawns them when
+    // the snapshot is reloaded.
+    handles.push(tokio::spawn(run_health_supervisor(
+        shared.clone(),
+        snapshot.connect_timeout,
+        shutdown.clone(),
+        reload,
+    )));
 
     for handle in handles {
         let _ = handle.await;

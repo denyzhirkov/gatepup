@@ -232,10 +232,23 @@ impl RuntimeConfig {
     }
 }
 
-/// Build the runtime snapshot from a validated config. The config is assumed to
-/// have passed [`gatepup_config::validate`]; bind parsing is re-checked
-/// defensively and surfaced as a typed error rather than a panic.
+/// Build the runtime snapshot from a validated config (TLS acceptors included).
+/// The config is assumed to have passed [`gatepup_config::validate`].
 pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyError> {
+    build_snapshot_inner(config, true)
+}
+
+/// Build a snapshot for a hot reload: identical, but WITHOUT building TLS
+/// acceptors. Listener bindings/acceptors are fixed at startup, so reload only
+/// swaps routing/upstreams and must not depend on (or re-read) cert files.
+pub fn build_reload_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyError> {
+    build_snapshot_inner(config, false)
+}
+
+fn build_snapshot_inner(
+    config: &GatePupConfig,
+    with_tls: bool,
+) -> Result<RuntimeConfig, ProxyError> {
     let mut upstreams = HashMap::with_capacity(config.upstreams.len());
     for upstream in &config.upstreams {
         let hc = upstream.health_check.as_ref();
@@ -289,14 +302,16 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
             name: listener.name.clone(),
             bind: listener.bind.clone(),
         })?;
-        let tls = match &listener.tls {
-            Some(cfg) => Some(
-                crate::tls::build_acceptor(cfg).map_err(|e| ProxyError::Tls {
-                    listener: listener.name.clone(),
-                    message: e.to_string(),
-                })?,
-            ),
-            None => None,
+        let tls = match (&listener.tls, with_tls) {
+            (Some(cfg), true) => {
+                Some(
+                    crate::tls::build_acceptor(cfg).map_err(|e| ProxyError::Tls {
+                        listener: listener.name.clone(),
+                        message: e.to_string(),
+                    })?,
+                )
+            }
+            _ => None,
         };
         listeners.push(Arc::new(ListenerRuntime {
             name: listener.name.clone(),

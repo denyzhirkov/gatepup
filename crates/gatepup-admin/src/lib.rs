@@ -13,8 +13,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use gatepup_observability::Metrics;
-use gatepup_proxy::RuntimeConfig;
+use gatepup_proxy::SharedConfig;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -32,15 +33,16 @@ pub enum AdminError {
     },
 }
 
-/// Everything the admin handlers need. Shared read-only via `Arc`.
+/// Everything the admin handlers need. Reads the CURRENT snapshot/effective
+/// config so the admin API reflects hot reloads.
 pub struct AdminState {
     pub bind: SocketAddr,
-    pub snapshot: Arc<RuntimeConfig>,
+    pub snapshot: SharedConfig,
     pub metrics: Arc<Metrics>,
     /// Metrics endpoint path, or `None` when metrics are disabled.
     pub metrics_path: Option<String>,
-    /// Pre-rendered effective config JSON for `/config/effective`.
-    pub effective_config: Arc<String>,
+    /// Pre-rendered effective config JSON for `/config/effective` (swapped on reload).
+    pub effective_config: Arc<ArcSwap<String>>,
     pub version: &'static str,
 }
 

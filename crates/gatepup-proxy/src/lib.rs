@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 pub use error::ProxyError;
 pub use server::{run, serve, serve_shared};
-pub use snapshot::{build_snapshot, RouteView, RuntimeConfig, TargetView, UpstreamView};
+pub use snapshot::{
+    build_reload_snapshot, build_snapshot, RouteView, RuntimeConfig, TargetView, UpstreamView,
+};
 
 /// Boxed error used as the unified error type for response bodies.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

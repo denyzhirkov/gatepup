@@ -30,16 +30,16 @@ pub(crate) fn route(state: &AdminState, req: Request<Incoming>) -> Response<Full
         "/health" => json(StatusCode::OK, &health_payload(state.version)),
         "/routes" => json(
             StatusCode::OK,
-            &json!({ "routes": state.snapshot.routes() }),
+            &json!({ "routes": state.snapshot.load().routes() }),
         ),
         "/upstreams" => json(
             StatusCode::OK,
-            &json!({ "upstreams": state.snapshot.upstreams_view() }),
+            &json!({ "upstreams": state.snapshot.load().upstreams_view() }),
         ),
         "/config/effective" => response(
             StatusCode::OK,
             "application/json",
-            (*state.effective_config).clone(),
+            state.effective_config.load().as_ref().clone(),
         ),
         _ => json(StatusCode::NOT_FOUND, &json!({ "error": "not_found" })),
     }
@@ -47,7 +47,7 @@ pub(crate) fn route(state: &AdminState, req: Request<Incoming>) -> Response<Full
 
 fn metrics(state: &AdminState) -> Response<Full<Bytes>> {
     // Refresh the per-upstream health gauge from the live snapshot at scrape time.
-    for (upstream, healthy) in state.snapshot.healthy_counts() {
+    for (upstream, healthy) in state.snapshot.load().healthy_counts() {
         state.metrics.set_upstream_healthy(&upstream, healthy);
     }
     response(

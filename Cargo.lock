@@ -255,6 +255,7 @@ dependencies = [
 name = "gatepup-admin"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "gatepup-config",
  "gatepup-observability",
@@ -306,6 +307,7 @@ dependencies = [
 name = "gatepup-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "gatepup-admin",
  "gatepup-config",
  "gatepup-observability",
@@ -313,6 +315,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

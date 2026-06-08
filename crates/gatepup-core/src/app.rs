@@ -1,9 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use gatepup_admin::AdminState;
 use gatepup_config::{load_from_file, validate, GatePupConfig};
 use gatepup_observability::Metrics;
+use gatepup_proxy::SharedConfig;
 use tokio::sync::watch;
 
 use crate::error::CoreError;
@@ -24,19 +26,30 @@ pub fn print_config(path: impl AsRef<Path>) -> Result<String, CoreError> {
 }
 
 /// Build the runtime, then serve the proxy and (if enabled) the admin server
-/// until a shutdown signal (SIGINT/SIGTERM). This is the composition root: it
-/// owns the shutdown signal and the shared metrics, and runs both servers
-/// concurrently so a bind failure on either surfaces immediately.
-pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
-    let snapshot = Arc::new(gatepup_proxy::build_snapshot(&config)?);
+/// until a shutdown signal (SIGINT/SIGTERM). Composition root: it owns the
+/// shutdown and reload signals plus the shared, swappable snapshot, and runs
+/// both servers concurrently so a bind failure on either surfaces immediately.
+/// SIGHUP re-reads `config_path` and hot-swaps the routing snapshot.
+pub async fn serve(config: GatePupConfig, config_path: PathBuf) -> Result<(), CoreError> {
+    let shared: SharedConfig = Arc::new(ArcSwap::from_pointee(gatepup_proxy::build_snapshot(
+        &config,
+    )?));
+    let effective: Arc<ArcSwap<String>> = Arc::new(ArcSwap::from_pointee(
+        serde_json::to_string_pretty(&config)?,
+    ));
     let metrics = Arc::new(Metrics::new()?);
-    let effective_config = Arc::new(serde_json::to_string_pretty(&config)?);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = shutdown_tx.send(true);
-    });
+    let (reload_tx, reload_rx) = watch::channel(0u64);
+
+    tokio::spawn(signal_loop(
+        config_path,
+        shared.clone(),
+        effective.clone(),
+        metrics.clone(),
+        shutdown_tx,
+        reload_tx,
+    ));
 
     let admin_state = match &config.admin {
         Some(admin) if admin.enabled => {
@@ -51,10 +64,10 @@ pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
                 .map(|m| m.path.clone());
             Some(Arc::new(AdminState {
                 bind,
-                snapshot: snapshot.clone(),
+                snapshot: shared.clone(),
                 metrics: metrics.clone(),
                 metrics_path,
-                effective_config: effective_config.clone(),
+                effective_config: effective.clone(),
                 version: env!("CARGO_PKG_VERSION"),
             }))
         }
@@ -62,9 +75,14 @@ pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
     };
 
     let proxy_fut = async {
-        gatepup_proxy::serve(snapshot.clone(), metrics.clone(), shutdown_rx.clone())
-            .await
-            .map_err(CoreError::from)
+        gatepup_proxy::serve_shared(
+            shared.clone(),
+            metrics.clone(),
+            shutdown_rx.clone(),
+            reload_rx,
+        )
+        .await
+        .map_err(CoreError::from)
     };
     let admin_fut = async {
         match admin_state {
@@ -79,35 +97,80 @@ pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Resolve when the process receives a termination signal. On Unix this is
-/// SIGINT (Ctrl-C) **or** SIGTERM (`docker stop`, systemd); falling back to
-/// Ctrl-C only if a handler can't be installed.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = signal(SignalKind::terminate()).ok();
-        let mut int = signal(SignalKind::interrupt()).ok();
-        match (term.as_mut(), int.as_mut()) {
-            (Some(term), Some(int)) => {
-                tokio::select! {
-                    _ = term.recv() => {}
-                    _ = int.recv() => {}
-                }
+/// Wait on termination + reload signals. SIGINT/SIGTERM -> shutdown; SIGHUP ->
+/// hot reload from `config_path`. Falls back to Ctrl-C-only off Unix.
+#[cfg(unix)]
+async fn signal_loop(
+    config_path: PathBuf,
+    shared: SharedConfig,
+    effective: Arc<ArcSwap<String>>,
+    metrics: Arc<Metrics>,
+    shutdown_tx: watch::Sender<bool>,
+    reload_tx: watch::Sender<u64>,
+) {
+    use tokio::signal::unix::{signal, Signal, SignalKind};
+
+    async fn recv(sig: &mut Option<Signal>) {
+        match sig {
+            Some(s) => {
+                s.recv().await;
             }
-            (Some(term), None) => {
-                term.recv().await;
-            }
-            (None, Some(int)) => {
-                int.recv().await;
-            }
-            (None, None) => {
-                let _ = tokio::signal::ctrl_c().await;
+            None => std::future::pending::<()>().await,
+        }
+    }
+
+    let mut term = signal(SignalKind::terminate()).ok();
+    let mut int = signal(SignalKind::interrupt()).ok();
+    let mut hup = signal(SignalKind::hangup()).ok();
+
+    loop {
+        tokio::select! {
+            _ = recv(&mut term) => { let _ = shutdown_tx.send(true); break; }
+            _ = recv(&mut int) => { let _ = shutdown_tx.send(true); break; }
+            _ = recv(&mut hup) => {
+                reload(&config_path, &shared, &effective, &metrics, &reload_tx);
             }
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(not(unix))]
+async fn signal_loop(
+    _config_path: PathBuf,
+    _shared: SharedConfig,
+    _effective: Arc<ArcSwap<String>>,
+    _metrics: Arc<Metrics>,
+    shutdown_tx: watch::Sender<bool>,
+    _reload_tx: watch::Sender<u64>,
+) {
+    let _ = tokio::signal::ctrl_c().await;
+    let _ = shutdown_tx.send(true);
+}
+
+/// Re-read, validate, and hot-swap the routing snapshot. On ANY error the
+/// current config is kept (a bad reload never breaks the running proxy).
+fn reload(
+    config_path: &Path,
+    shared: &SharedConfig,
+    effective: &ArcSwap<String>,
+    metrics: &Metrics,
+    reload_tx: &watch::Sender<u64>,
+) {
+    match load_validated(config_path).and_then(|cfg| {
+        let snapshot = gatepup_proxy::build_reload_snapshot(&cfg)?;
+        let rendered = serde_json::to_string_pretty(&cfg)?;
+        Ok((snapshot, rendered))
+    }) {
+        Ok((snapshot, rendered)) => {
+            shared.store(Arc::new(snapshot));
+            effective.store(Arc::new(rendered));
+            reload_tx.send_modify(|v| *v = v.wrapping_add(1));
+            metrics.inc_config_reload(true);
+            tracing::info!("config reloaded");
+        }
+        Err(err) => {
+            metrics.inc_config_reload(false);
+            tracing::error!(error = %err, "config reload failed, keeping current config");
+        }
     }
 }

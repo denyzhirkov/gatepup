@@ -58,8 +58,8 @@ fn main() -> ExitCode {
 }
 
 /// Load and validate the config, install JSON logging, then serve until Ctrl-C.
-fn run(config: PathBuf) -> ExitCode {
-    let config = match load_validated(&config) {
+fn run(config_path: PathBuf) -> ExitCode {
+    let config = match load_validated(&config_path) {
         Ok(cfg) => cfg,
         Err(err) => return report(err),
     };
@@ -76,7 +76,7 @@ fn run(config: PathBuf) -> ExitCode {
         }
     };
 
-    match runtime.block_on(serve(config)) {
+    match runtime.block_on(serve(config, config_path)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => report(err),
     }

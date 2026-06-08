@@ -1,5 +1,6 @@
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,
+    TextEncoder,
 };
 use thiserror::Error;
 
@@ -19,6 +20,7 @@ pub struct Metrics {
     upstream_retries_total: IntCounter,
     route_not_found_total: IntCounter,
     upstream_healthy: IntGaugeVec,
+    config_reloads_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -53,6 +55,10 @@ impl Metrics {
             ),
             &["upstream"],
         )?;
+        let config_reloads_total = IntCounterVec::new(
+            Opts::new("gatepup_config_reloads_total", "Config reload attempts"),
+            &["result"],
+        )?;
 
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(request_duration.clone()))?;
@@ -61,6 +67,7 @@ impl Metrics {
         registry.register(Box::new(upstream_retries_total.clone()))?;
         registry.register(Box::new(route_not_found_total.clone()))?;
         registry.register(Box::new(upstream_healthy.clone()))?;
+        registry.register(Box::new(config_reloads_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -71,6 +78,7 @@ impl Metrics {
             upstream_retries_total,
             route_not_found_total,
             upstream_healthy,
+            config_reloads_total,
         })
     }
 
@@ -96,6 +104,11 @@ impl Metrics {
 
     pub fn inc_route_not_found(&self) {
         self.route_not_found_total.inc();
+    }
+
+    pub fn inc_config_reload(&self, success: bool) {
+        let result = if success { "success" } else { "failure" };
+        self.config_reloads_total.with_label_values(&[result]).inc();
     }
 
     pub fn set_upstream_healthy(&self, upstream: &str, healthy: i64) {

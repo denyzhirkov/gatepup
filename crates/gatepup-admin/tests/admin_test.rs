@@ -69,10 +69,14 @@ fn sample_config() -> GatePupConfig {
 
 async fn spawn_admin() -> u16 {
     let config = sample_config();
-    let snapshot = Arc::new(gatepup_proxy::build_snapshot(&config).unwrap());
+    let snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(
+        gatepup_proxy::build_snapshot(&config).unwrap(),
+    ));
     let metrics = Arc::new(Metrics::new().unwrap());
     metrics.inc_requests(); // ensure a non-zero counter shows up in /metrics
-    let effective_config = Arc::new(serde_json::to_string_pretty(&config).unwrap());
+    let effective_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        serde_json::to_string_pretty(&config).unwrap(),
+    ));
     let port = free_port();
 
     let state = Arc::new(AdminState {
