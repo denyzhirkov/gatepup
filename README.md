@@ -74,6 +74,26 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+## TLS
+
+GatePup can terminate TLS at a listener (rustls, ring provider). Upstreams stay
+plain HTTP — TLS is terminated at the edge.
+
+```json
+{
+  "name": "public-https",
+  "bind": "0.0.0.0:443",
+  "protocol": "https",
+  "tls": { "cert": "/etc/gatepup/tls/cert.pem", "key": "/etc/gatepup/tls/key.pem" },
+  "routes": [ { "name": "app", "match": { "pathPrefix": "/" }, "upstream": "app" } ]
+}
+```
+
+- `cert` / `key` are PEM file paths (cert chain + private key). They are read at
+  startup; a load failure stops the proxy with a clear error.
+- Requests forwarded from a TLS listener carry `X-Forwarded-Proto: https`.
+- ACME / Let's Encrypt is not included yet (planned).
+
 ## Retries
 
 Retries are opt-in per upstream. When enabled, a failed attempt is retried onto a
