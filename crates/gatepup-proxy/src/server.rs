@@ -7,7 +7,7 @@ use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -140,31 +140,9 @@ async fn accept_loop(
                         remote,
                         shutdown: shutdown.clone(),
                     };
-                    match &tls {
-                        // TLS handshake runs inline (bounded); offloading it is a follow-up.
-                        Some(acceptor) => {
-                            let tls = match tokio::time::timeout(
-                                HANDSHAKE_TIMEOUT,
-                                acceptor.accept(stream),
-                            )
-                            .await
-                            {
-                                Ok(Ok(tls)) => tls,
-                                Ok(Err(err)) => {
-                                    tracing::debug!(error = %err, "tls handshake failed");
-                                    continue;
-                                }
-                                Err(_) => {
-                                    tracing::debug!("tls handshake timed out");
-                                    continue;
-                                }
-                            };
-                            conns.spawn(serve_connection(TokioIo::new(tls), ctx));
-                        }
-                        None => {
-                            conns.spawn(serve_connection(TokioIo::new(stream), ctx));
-                        }
-                    }
+                    // Handshake (TLS) runs inside the spawned task, off the accept
+                    // loop, so a slow handshake can't stall accepting new connections.
+                    conns.spawn(serve_connection_maybe_tls(stream, tls.clone(), ctx));
                 }
                 Err(err) => tracing::warn!(error = %err, "accept failed"),
             },
@@ -182,6 +160,29 @@ async fn accept_loop(
             tracing::warn!(listener = %listener_name, "drain timed out, forcing shutdown");
             conns.abort_all();
         }
+    }
+}
+
+/// Complete the TLS handshake (if any) inside the connection task, then serve.
+/// Bounded by `HANDSHAKE_TIMEOUT`; a failed/slow handshake drops the connection.
+async fn serve_connection_maybe_tls(stream: TcpStream, tls: Option<TlsAcceptor>, ctx: ConnCtx) {
+    match tls {
+        Some(acceptor) => {
+            let tls_stream =
+                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    Ok(Ok(tls)) => tls,
+                    Ok(Err(err)) => {
+                        tracing::debug!(error = %err, "tls handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!("tls handshake timed out");
+                        return;
+                    }
+                };
+            serve_connection(TokioIo::new(tls_stream), ctx).await;
+        }
+        None => serve_connection(TokioIo::new(stream), ctx).await,
     }
 }
 
