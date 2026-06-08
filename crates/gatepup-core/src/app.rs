@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use gatepup_admin::AdminState;
-use gatepup_config::{load_from_file, validate, GatePupConfig};
+use gatepup_config::{load_from_file, resolve_config, validate, ConfigSource, GatePupConfig};
 use gatepup_observability::Metrics;
 use gatepup_proxy::SharedConfig;
 use tokio::sync::watch;
@@ -18,9 +18,19 @@ pub fn load_validated(path: impl AsRef<Path>) -> Result<GatePupConfig, CoreError
     Ok(config)
 }
 
-/// Load, validate, and render the effective config as pretty JSON.
-pub fn print_config(path: impl AsRef<Path>) -> Result<String, CoreError> {
-    let config = load_validated(path)?;
+/// Resolve the effective config from `--config` and/or the environment, then
+/// validate it.
+pub fn resolve_validated(
+    cli_path: Option<&Path>,
+) -> Result<(GatePupConfig, ConfigSource), CoreError> {
+    let (config, source) = resolve_config(cli_path)?;
+    validate(&config).map_err(CoreError::Invalid)?;
+    Ok((config, source))
+}
+
+/// Resolve, validate, and render the effective config as pretty JSON.
+pub fn print_config(cli_path: Option<&Path>) -> Result<String, CoreError> {
+    let (config, _) = resolve_validated(cli_path)?;
     let rendered = serde_json::to_string_pretty(&config)?;
     Ok(rendered)
 }
@@ -30,7 +40,7 @@ pub fn print_config(path: impl AsRef<Path>) -> Result<String, CoreError> {
 /// shutdown and reload signals plus the shared, swappable snapshot, and runs
 /// both servers concurrently so a bind failure on either surfaces immediately.
 /// SIGHUP re-reads `config_path` and hot-swaps the routing snapshot.
-pub async fn serve(config: GatePupConfig, config_path: PathBuf) -> Result<(), CoreError> {
+pub async fn serve(config: GatePupConfig, cli_path: Option<PathBuf>) -> Result<(), CoreError> {
     let shared: SharedConfig = Arc::new(ArcSwap::from_pointee(gatepup_proxy::build_snapshot(
         &config,
     )?));
@@ -43,7 +53,7 @@ pub async fn serve(config: GatePupConfig, config_path: PathBuf) -> Result<(), Co
     let (reload_tx, reload_rx) = watch::channel(0u64);
 
     tokio::spawn(signal_loop(
-        config_path,
+        cli_path,
         shared.clone(),
         effective.clone(),
         metrics.clone(),
@@ -101,7 +111,7 @@ pub async fn serve(config: GatePupConfig, config_path: PathBuf) -> Result<(), Co
 /// hot reload from `config_path`. Falls back to Ctrl-C-only off Unix.
 #[cfg(unix)]
 async fn signal_loop(
-    config_path: PathBuf,
+    cli_path: Option<PathBuf>,
     shared: SharedConfig,
     effective: Arc<ArcSwap<String>>,
     metrics: Arc<Metrics>,
@@ -128,7 +138,7 @@ async fn signal_loop(
             _ = recv(&mut term) => { let _ = shutdown_tx.send(true); break; }
             _ = recv(&mut int) => { let _ = shutdown_tx.send(true); break; }
             _ = recv(&mut hup) => {
-                reload(&config_path, &shared, &effective, &metrics, &reload_tx);
+                reload(cli_path.as_deref(), &shared, &effective, &metrics, &reload_tx);
             }
         }
     }
@@ -136,7 +146,7 @@ async fn signal_loop(
 
 #[cfg(not(unix))]
 async fn signal_loop(
-    _config_path: PathBuf,
+    _cli_path: Option<PathBuf>,
     _shared: SharedConfig,
     _effective: Arc<ArcSwap<String>>,
     _metrics: Arc<Metrics>,
@@ -150,13 +160,13 @@ async fn signal_loop(
 /// Re-read, validate, and hot-swap the routing snapshot. On ANY error the
 /// current config is kept (a bad reload never breaks the running proxy).
 fn reload(
-    config_path: &Path,
+    cli_path: Option<&Path>,
     shared: &SharedConfig,
     effective: &ArcSwap<String>,
     metrics: &Metrics,
     reload_tx: &watch::Sender<u64>,
 ) {
-    match load_validated(config_path).and_then(|cfg| {
+    match resolve_validated(cli_path).and_then(|(cfg, _)| {
         let snapshot = gatepup_proxy::build_reload_snapshot(&cfg)?;
         let rendered = serde_json::to_string_pretty(&cfg)?;
         Ok((snapshot, rendered))
@@ -209,7 +219,7 @@ mod tests {
         let (tx, _rx) = watch::channel(0u64);
 
         reload(
-            Path::new("/no/such/gatepup-config.json"),
+            Some(Path::new("/no/such/gatepup-config.json")),
             &shared,
             &effective,
             &metrics,
@@ -233,7 +243,7 @@ mod tests {
         let metrics = Metrics::new().unwrap();
         let (tx, _rx) = watch::channel(0u64);
 
-        reload(&b, &shared, &effective, &metrics, &tx);
+        reload(Some(&b), &shared, &effective, &metrics, &tx);
 
         assert!(
             !Arc::ptr_eq(&before, &shared.load_full()),

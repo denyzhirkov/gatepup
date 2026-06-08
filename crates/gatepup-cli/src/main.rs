@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use gatepup_core::{load_validated, print_config, serve, CoreError};
+use gatepup_core::{print_config, resolve_validated, serve, CoreError};
 use gatepup_observability::init_logging;
 
 #[derive(Parser)]
@@ -18,20 +18,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the proxy with the given config.
+    /// Run the proxy. Config comes from --config or the environment.
     Run {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
-    /// Validate a config file and report any problems.
+    /// Validate the config (file or environment) and report any problems.
     Validate {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
     /// Validate and print the effective config as JSON.
     PrintConfig {
         #[arg(long, value_name = "PATH")]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
 }
 
@@ -40,14 +40,14 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Run { config } => run(config),
-        Command::Validate { config } => match load_validated(&config) {
-            Ok(cfg) => {
-                println!("Config is valid: {} ({}).", config.display(), cfg.app.name);
+        Command::Validate { config } => match resolve_validated(config.as_deref()) {
+            Ok((cfg, source)) => {
+                println!("Config is valid ({source:?}): {}.", cfg.app.name);
                 ExitCode::SUCCESS
             }
             Err(err) => report(err),
         },
-        Command::PrintConfig { config } => match print_config(&config) {
+        Command::PrintConfig { config } => match print_config(config.as_deref()) {
             Ok(rendered) => {
                 println!("{rendered}");
                 ExitCode::SUCCESS
@@ -58,9 +58,9 @@ fn main() -> ExitCode {
 }
 
 /// Load and validate the config, install JSON logging, then serve until Ctrl-C.
-fn run(config_path: PathBuf) -> ExitCode {
-    let config = match load_validated(&config_path) {
-        Ok(cfg) => cfg,
+fn run(config_path: Option<PathBuf>) -> ExitCode {
+    let config = match resolve_validated(config_path.as_deref()) {
+        Ok((cfg, _source)) => cfg,
         Err(err) => return report(err),
     };
     init_logging(&config.app.log_level);
