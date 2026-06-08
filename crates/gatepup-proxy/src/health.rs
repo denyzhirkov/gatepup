@@ -101,8 +101,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn build_health_client() -> HealthClient {
-    Client::builder(TokioExecutor::new()).build_http()
+pub(crate) fn build_health_client(connect_timeout: Duration) -> HealthClient {
+    let mut connector = HttpConnector::new();
+    connector.set_connect_timeout(Some(connect_timeout));
+    Client::builder(TokioExecutor::new()).build(connector)
 }
 
 /// Background active-health loop for one upstream. Probes every target each

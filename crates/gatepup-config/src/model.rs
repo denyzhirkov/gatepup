@@ -9,9 +9,39 @@ pub struct GatePupConfig {
     pub listeners: Vec<ListenerConfig>,
     pub upstreams: Vec<UpstreamConfig>,
     #[serde(default)]
+    pub timeouts: TimeoutConfig,
+    #[serde(default)]
     pub admin: Option<AdminConfig>,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
+}
+
+/// Proxy timeouts. `connect` bounds establishing the upstream connection;
+/// `request` bounds the whole upstream round-trip (mapped to 504 on expiry).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TimeoutConfig {
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_request_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: default_connect_timeout_ms(),
+            request_timeout_ms: default_request_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

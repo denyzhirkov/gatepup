@@ -15,6 +15,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
     check_listeners(config, &upstream_names, &mut errors);
     check_upstreams(config, &mut errors);
     check_admin(config, &mut errors);
+    check_timeouts(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -124,6 +125,19 @@ fn check_admin(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     }
 }
 
+fn check_timeouts(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    if config.timeouts.connect_timeout_ms == 0 {
+        errors.push(ValidationError::ZeroTimeout {
+            field: "connectTimeoutMs",
+        });
+    }
+    if config.timeouts.request_timeout_ms == 0 {
+        errors.push(ValidationError::ZeroTimeout {
+            field: "requestTimeoutMs",
+        });
+    }
+}
+
 fn is_valid_target_url(raw: &str) -> bool {
     match url::Url::parse(raw) {
         Ok(url) => matches!(url.scheme(), "http" | "https") && url.host().is_some(),
@@ -176,6 +190,7 @@ mod tests {
                 routes: vec![route("api", "api.example.com", "api")],
             }],
             upstreams: vec![upstream("api", vec![target("http://api-1:4000")])],
+            timeouts: Default::default(),
             admin: None,
             metrics: None,
         }
@@ -281,6 +296,16 @@ mod tests {
                 interval_ms: 1000,
             })
         );
+    }
+
+    #[test]
+    fn rejects_zero_timeouts() {
+        let mut cfg = valid_config();
+        cfg.timeouts.request_timeout_ms = 0;
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::ZeroTimeout {
+            field: "requestTimeoutMs",
+        }));
     }
 
     #[test]

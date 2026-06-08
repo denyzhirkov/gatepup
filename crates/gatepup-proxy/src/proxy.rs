@@ -19,9 +19,6 @@ use gatepup_observability::Metrics;
 use crate::snapshot::{ListenerRuntime, RuntimeConfig};
 use crate::BoxError;
 
-/// Hard request timeout until configurable timeout policies land (v0.2).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Hop-by-hop headers that must not be forwarded to the upstream.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -37,8 +34,10 @@ const HOP_BY_HOP: &[&str] = &[
 pub(crate) type ResponseBody = BoxBody<Bytes, BoxError>;
 pub(crate) type ProxyClient = Client<HttpConnector, Incoming>;
 
-pub(crate) fn build_client() -> ProxyClient {
-    Client::builder(TokioExecutor::new()).build_http()
+pub(crate) fn build_client(connect_timeout: Duration) -> ProxyClient {
+    let mut connector = HttpConnector::new();
+    connector.set_connect_timeout(Some(connect_timeout));
+    Client::builder(TokioExecutor::new()).build(connector)
 }
 
 /// Per-request failure that maps to a specific HTTP status + JSON error body.
@@ -154,7 +153,7 @@ async fn forward(
 
     // Passive health: feed each proxied outcome into the target's health state.
     // Connect error / timeout / 5xx count as failures; anything else succeeds.
-    match tokio::time::timeout(REQUEST_TIMEOUT, client.request(upstream_req)).await {
+    match tokio::time::timeout(config.request_timeout, client.request(upstream_req)).await {
         Err(_elapsed) => {
             target.state.observe(false);
             Err(GatewayError::UpstreamTimeout)

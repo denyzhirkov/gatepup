@@ -178,6 +178,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 unhealthy_threshold: 1,
             }),
         }],
+        timeouts: Default::default(),
         admin: None,
         metrics: None,
     }
@@ -221,6 +222,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
             }],
             health_check: None,
         }],
+        timeouts: Default::default(),
         admin: None,
         metrics: None,
     }
@@ -353,6 +355,24 @@ async fn active_checks_eject_then_recover() {
     // Flip backend healthy → active probe recovers it → 200.
     healthy.store(true, Ordering::Relaxed);
     wait_for_status(proxy_port, 200, "after recovery").await;
+}
+
+#[tokio::test]
+async fn returns_504_when_request_exceeds_timeout() {
+    let backend_port = spawn_slow_backend(1000).await; // ~1s response
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.timeouts.request_timeout_ms = 150; // shorter than the backend delay
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 504);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("upstream_timeout"),
+        "body was: {body:?}"
+    );
 }
 
 #[tokio::test]

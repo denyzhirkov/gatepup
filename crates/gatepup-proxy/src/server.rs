@@ -27,7 +27,7 @@ pub async fn serve(
     metrics: Arc<Metrics>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
-    let client = build_client();
+    let client = build_client(snapshot.connect_timeout);
 
     let mut handles = Vec::with_capacity(snapshot.listeners.len());
     for listener in &snapshot.listeners {
@@ -51,7 +51,7 @@ pub async fn serve(
     }
 
     // Active health checks for upstreams that opted in.
-    let health_client = build_health_client();
+    let health_client = build_health_client(snapshot.connect_timeout);
     for (name, upstream) in &snapshot.upstreams {
         if let Some(settings) = upstream.health.clone() {
             tracing::info!(upstream = %name, "active health checks enabled");

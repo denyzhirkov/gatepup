@@ -24,9 +24,9 @@ pub fn print_config(path: impl AsRef<Path>) -> Result<String, CoreError> {
 }
 
 /// Build the runtime, then serve the proxy and (if enabled) the admin server
-/// until Ctrl-C. This is the composition root: it owns the shutdown signal and
-/// the shared metrics, and runs both servers concurrently so a bind failure on
-/// either surfaces immediately.
+/// until a shutdown signal (SIGINT/SIGTERM). This is the composition root: it
+/// owns the shutdown signal and the shared metrics, and runs both servers
+/// concurrently so a bind failure on either surfaces immediately.
 pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
     let snapshot = Arc::new(gatepup_proxy::build_snapshot(&config)?);
     let metrics = Arc::new(Metrics::new()?);
@@ -34,9 +34,8 @@ pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = shutdown_tx.send(true);
-        }
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
     });
 
     let admin_state = match &config.admin {
@@ -78,4 +77,37 @@ pub async fn serve(config: GatePupConfig) -> Result<(), CoreError> {
 
     tokio::try_join!(proxy_fut, admin_fut)?;
     Ok(())
+}
+
+/// Resolve when the process receives a termination signal. On Unix this is
+/// SIGINT (Ctrl-C) **or** SIGTERM (`docker stop`, systemd); falling back to
+/// Ctrl-C only if a handler can't be installed.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut int = signal(SignalKind::interrupt()).ok();
+        match (term.as_mut(), int.as_mut()) {
+            (Some(term), Some(int)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            }
+            (Some(term), None) => {
+                term.recv().await;
+            }
+            (None, Some(int)) => {
+                int.recv().await;
+            }
+            (None, None) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

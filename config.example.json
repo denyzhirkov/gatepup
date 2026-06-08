@@ -70,6 +70,10 @@
       }
     }
   ],
+  "timeouts": {
+    "connectTimeoutMs": 5000,
+    "requestTimeoutMs": 30000
+  },
   "admin": {
     "enabled": true,
     "bind": "127.0.0.1:8080"

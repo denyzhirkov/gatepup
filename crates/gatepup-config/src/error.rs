@@ -60,4 +60,7 @@ pub enum ValidationError {
         timeout_ms: u64,
         interval_ms: u64,
     },
+
+    #[error("timeout {field:?} must be greater than zero")]
+    ZeroTimeout { field: &'static str },
 }

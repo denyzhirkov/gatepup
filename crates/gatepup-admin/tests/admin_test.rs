@@ -59,6 +59,7 @@ fn sample_config() -> GatePupConfig {
                 unhealthy_threshold: 3,
             }),
         }],
+        timeouts: Default::default(),
         admin: None,
         metrics: None,
     }

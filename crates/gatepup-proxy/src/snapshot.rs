@@ -17,6 +17,10 @@ use crate::router::Router;
 pub struct RuntimeConfig {
     pub(crate) listeners: Vec<Arc<ListenerRuntime>>,
     pub(crate) upstreams: HashMap<String, Arc<UpstreamRuntime>>,
+    /// Timeout for establishing the upstream connection (set on the client).
+    pub(crate) connect_timeout: Duration,
+    /// Timeout for the whole upstream round-trip (mapped to 504 on expiry).
+    pub(crate) request_timeout: Duration,
 }
 
 pub(crate) struct ListenerRuntime {
@@ -200,6 +204,8 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
     Ok(RuntimeConfig {
         listeners,
         upstreams,
+        connect_timeout: Duration::from_millis(config.timeouts.connect_timeout_ms),
+        request_timeout: Duration::from_millis(config.timeouts.request_timeout_ms),
     })
 }
 
