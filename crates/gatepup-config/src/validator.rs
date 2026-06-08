@@ -315,6 +315,7 @@ mod tests {
                 path_prefix: Some("/".to_string()),
             },
             upstream: upstream.to_string(),
+            strip_prefix: false,
         }
     }
 

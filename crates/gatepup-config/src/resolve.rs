@@ -112,6 +112,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
                     path_prefix: Some("/".to_string()),
                 },
                 upstream: "default".to_string(),
+                strip_prefix: false,
             }],
         }],
         upstreams: vec![UpstreamConfig {

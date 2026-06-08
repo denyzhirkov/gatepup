@@ -42,6 +42,7 @@ fn sample_config() -> GatePupConfig {
                     path_prefix: Some("/".to_string()),
                 },
                 upstream: "api".to_string(),
+                strip_prefix: false,
             }],
         }],
         upstreams: vec![UpstreamConfig {

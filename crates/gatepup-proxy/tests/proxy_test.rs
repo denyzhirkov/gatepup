@@ -72,6 +72,32 @@ async fn spawn_labeled_backend(label: &'static str) -> u16 {
     port
 }
 
+/// A backend that echoes the request path+query it received as the response body.
+async fn spawn_path_echo_backend() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                    let pq = req
+                        .uri()
+                        .path_and_query()
+                        .map(|p| p.as_str().to_string())
+                        .unwrap_or_else(|| "/".to_string());
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(pq))))
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    port
+}
+
 /// A backend that completes a WebSocket-style upgrade (101) and then echoes
 /// every byte received on the upgraded connection.
 async fn spawn_ws_echo_backend() -> u16 {
@@ -240,6 +266,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                     path_prefix: Some("/".to_string()),
                 },
                 upstream: "u".to_string(),
+                strip_prefix: false,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -296,6 +323,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
                     path_prefix: Some("/".to_string()),
                 },
                 upstream: "u".to_string(),
+                strip_prefix: false,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -337,6 +365,14 @@ fn client() -> Client<HttpConnector, Full<Bytes>> {
 
 async fn get(port: u16) -> Response<hyper::body::Incoming> {
     request_method(port, Method::GET).await
+}
+
+async fn get_path(port: u16, path: &str) -> Response<hyper::body::Incoming> {
+    let req = Request::builder()
+        .uri(format!("http://127.0.0.1:{port}{path}"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    client().request(req).await.unwrap()
 }
 
 async fn request_method(port: u16, method: Method) -> Response<hyper::body::Incoming> {
@@ -840,6 +876,28 @@ async fn non_101_upgrade_response_is_relayed() {
         "non-101 upgrade response is relayed as-is"
     );
     assert_eq!(body_of(resp).await, "backend-ok");
+}
+
+#[tokio::test]
+async fn strip_prefix_forwards_stripped_path() {
+    let backend = spawn_path_echo_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend);
+    cfg.listeners[0].routes[0].matcher.path_prefix = Some("/api".to_string());
+    cfg.listeners[0].routes[0].strip_prefix = true;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    assert_eq!(
+        body_of(get_path(proxy_port, "/api/users?x=1").await).await,
+        "/users?x=1",
+        "matched prefix should be stripped, query preserved"
+    );
+    assert_eq!(
+        body_of(get_path(proxy_port, "/api").await).await,
+        "/",
+        "stripping to empty normalizes to /"
+    );
 }
 
 #[tokio::test]

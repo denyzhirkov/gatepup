@@ -91,6 +91,9 @@ pub struct RouteConfig {
     #[serde(rename = "match")]
     pub matcher: MatchConfig,
     pub upstream: String,
+    /// Strip the matched `pathPrefix` from the path before forwarding.
+    #[serde(default)]
+    pub strip_prefix: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -234,7 +234,7 @@ async fn forward(
 
     let (mut parts, body) = req.into_parts();
     let method = parts.method.clone();
-    let original_uri = parts.uri.clone();
+    let upstream_pq = route.rewritten_path_and_query(&parts.uri);
     rewrite_headers(&mut parts.headers, host, scheme, remote.ip(), request_id);
 
     // The body is buffered for replay only when retries are enabled for an
@@ -264,7 +264,7 @@ async fn forward(
         let Some(body) = body_source.next() else {
             break;
         };
-        let Some(upstream_req) = build_attempt_request(&parts, &original_uri, &target.url, body)
+        let Some(upstream_req) = build_attempt_request(&parts, &upstream_pq, &target.url, body)
         else {
             return Err(GatewayError::BadGateway);
         };
@@ -368,10 +368,19 @@ async fn handle_upgrade(
         parse_authority(&target.url).ok_or(GatewayError::BadGateway)?;
     let authority = format!("{target_host}:{target_port}");
 
+    let upstream_pq = route.rewritten_path_and_query(req.uri());
     // The client's upgraded IO becomes available after we return the 101.
     let client_upgrade = hyper::upgrade::on(&mut req);
-    let upstream_req = build_upgrade_request(&req, &authority, host, scheme, remote, request_id)
-        .ok_or(GatewayError::BadGateway)?;
+    let upstream_req = build_upgrade_request(
+        &req,
+        &upstream_pq,
+        &authority,
+        host,
+        scheme,
+        remote,
+        request_id,
+    )
+    .ok_or(GatewayError::BadGateway)?;
 
     let tcp = match TcpStream::connect((target_host.as_str(), target_port)).await {
         Ok(stream) => stream,
@@ -439,19 +448,16 @@ fn parse_authority(target_url: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_upgrade_request(
     req: &Request<Incoming>,
+    path_and_query: &str,
     authority: &str,
     fwd_host: &str,
     scheme: &str,
     remote: SocketAddr,
     request_id: &str,
 ) -> Option<Request<Empty<Bytes>>> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
     let mut headers = req.headers().clone();
     for name in UPGRADE_STRIP {
         headers.remove(*name);
@@ -463,7 +469,9 @@ fn build_upgrade_request(
     set_header(&mut headers, "x-forwarded-proto", scheme);
     set_header(&mut headers, "x-request-id", request_id);
 
-    let mut builder = Request::builder().method(req.method().clone()).uri(path);
+    let mut builder = Request::builder()
+        .method(req.method().clone())
+        .uri(path_and_query);
     *builder.headers_mut()? = headers;
     builder.body(Empty::<Bytes>::new()).ok()
 }
@@ -472,11 +480,11 @@ fn build_upgrade_request(
 /// Headers are cloned per attempt; extensions are intentionally dropped.
 fn build_attempt_request(
     template: &Parts,
-    original_uri: &Uri,
+    path_and_query: &str,
     target_url: &str,
     body: ResponseBody,
 ) -> Option<Request<ResponseBody>> {
-    let uri = build_upstream_uri(target_url, original_uri).ok()?;
+    let uri = build_upstream_uri(target_url, path_and_query).ok()?;
     let mut builder = Request::builder()
         .method(template.method.clone())
         .uri(uri)
@@ -516,14 +524,11 @@ fn rewrite_headers(
     set_header(headers, "x-request-id", request_id);
 }
 
-fn build_upstream_uri(target_url: &str, original: &Uri) -> Result<Uri, ()> {
+fn build_upstream_uri(target_url: &str, path_and_query: &str) -> Result<Uri, ()> {
     let base: Uri = target_url.parse().map_err(|_| ())?;
     let mut parts = base.into_parts();
-    let path_and_query = original
-        .path_and_query()
-        .cloned()
-        .unwrap_or_else(|| PathAndQuery::from_static("/"));
-    parts.path_and_query = Some(path_and_query);
+    let pq = PathAndQuery::try_from(path_and_query).map_err(|_| ())?;
+    parts.path_and_query = Some(pq);
     Uri::from_parts(parts).map_err(|_| ())
 }
 
@@ -624,23 +629,14 @@ mod tests {
     }
 
     #[test]
-    fn build_upstream_uri_keeps_path_and_query() {
-        let original: Uri = "http://gatepup.local/users?page=2".parse().unwrap();
-        let uri = build_upstream_uri("http://backend:4000", &original).unwrap();
+    fn build_upstream_uri_sets_path_and_query() {
+        let uri = build_upstream_uri("http://backend:4000", "/users?page=2").unwrap();
         assert_eq!(uri.to_string(), "http://backend:4000/users?page=2");
     }
 
     #[test]
-    fn build_upstream_uri_defaults_empty_path_to_root() {
-        let original: Uri = "http://gatepup.local".parse().unwrap();
-        let uri = build_upstream_uri("http://backend:4000", &original).unwrap();
-        assert_eq!(uri.to_string(), "http://backend:4000/");
-    }
-
-    #[test]
     fn build_upstream_uri_rejects_invalid_target() {
-        let original: Uri = "/".parse().unwrap();
-        assert!(build_upstream_uri("not a url", &original).is_err());
+        assert!(build_upstream_uri("not a url", "/").is_err());
     }
 
     fn ip() -> IpAddr {

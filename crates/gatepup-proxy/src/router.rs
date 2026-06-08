@@ -1,4 +1,5 @@
 use gatepup_config::RouteConfig;
+use http::Uri;
 
 /// How a route matches the request host.
 enum HostMatch {
@@ -49,6 +50,7 @@ pub(crate) struct CompiledRoute {
     host_match: HostMatch,
     /// Path prefix; defaults to `/` (matches every path).
     path_prefix: String,
+    strip_prefix: bool,
 }
 
 /// Read-only view of a route for admin/introspection.
@@ -68,6 +70,31 @@ impl CompiledRoute {
     /// longer path prefix beats a shorter one.
     fn specificity(&self) -> (u8, usize) {
         (self.host_match.rank(), self.path_prefix.len())
+    }
+
+    /// The path + query to forward upstream, applying `stripPrefix` if set.
+    /// Strips the matched `path_prefix` and normalizes to a leading `/`.
+    pub(crate) fn rewritten_path_and_query(&self, uri: &Uri) -> String {
+        let original = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        if !self.strip_prefix {
+            return original.to_string();
+        }
+        let (path, query) = match original.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (original, None),
+        };
+        let stripped = path.strip_prefix(self.path_prefix.as_str()).unwrap_or(path);
+        let new_path = if stripped.is_empty() {
+            "/".to_string()
+        } else if stripped.starts_with('/') {
+            stripped.to_string()
+        } else {
+            format!("/{stripped}")
+        };
+        match query {
+            Some(q) => format!("{new_path}?{q}"),
+            None => new_path,
+        }
     }
 }
 
@@ -93,6 +120,7 @@ impl Router {
                         .clone()
                         .filter(|p| !p.is_empty())
                         .unwrap_or_else(|| "/".to_string()),
+                    strip_prefix: r.strip_prefix,
                 }
             })
             .collect();
@@ -132,6 +160,7 @@ mod tests {
                 path_prefix: prefix.map(str::to_string),
             },
             upstream: name_upstream.to_string(),
+            strip_prefix: false,
         }
     }
 
@@ -222,6 +251,33 @@ mod tests {
             "wild"
         );
         assert_eq!(router.match_route("foo.com", "/").unwrap().upstream, "any");
+    }
+
+    #[test]
+    fn strip_prefix_rewrites_forwarded_path() {
+        let mut r = route("api", Some("h"), Some("/api"));
+        r.strip_prefix = true;
+        let router = Router::build(&[r]);
+        let cr = router.match_route("h", "/api/users").unwrap();
+        assert_eq!(
+            cr.rewritten_path_and_query(&"http://x/api/users?q=1".parse().unwrap()),
+            "/users?q=1"
+        );
+        // Stripping down to nothing normalizes to "/".
+        assert_eq!(
+            cr.rewritten_path_and_query(&"http://x/api".parse().unwrap()),
+            "/"
+        );
+    }
+
+    #[test]
+    fn no_strip_keeps_original_path() {
+        let router = Router::build(&[route("api", Some("h"), Some("/api"))]);
+        let cr = router.match_route("h", "/api/users").unwrap();
+        assert_eq!(
+            cr.rewritten_path_and_query(&"http://x/api/users".parse().unwrap()),
+            "/api/users"
+        );
     }
 
     #[test]
