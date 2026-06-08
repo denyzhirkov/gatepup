@@ -97,9 +97,9 @@ stop` shuts down gracefully (SIGTERM drains in-flight requests).
 
 See [`config.example.json`](./config.example.json) for a full example. A config
 declares `listeners` (with routes that match on host + path prefix), `upstreams`
-(target groups with a load-balancing strategy and optional health checks),
-`timeouts` (`connectTimeoutMs` / `requestTimeoutMs`), and optional `admin` /
-`metrics` sections.
+(target groups with weighted round-robin — each target has an optional `weight`,
+default 1 — and optional health checks), `timeouts` (`connectTimeoutMs` /
+`requestTimeoutMs`), and optional `admin` / `metrics` sections.
 
 ## Development
 

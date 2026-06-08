@@ -22,7 +22,7 @@ RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/gatepup
 # Default config baked in; override by mounting over /etc/gatepup/config.json.
 COPY config.docker.json /etc/gatepup/config.json
 
-RUN useradd --system --uid 10001 --no-create-home gatepup \
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin gatepup \
     && chown -R gatepup:gatepup /etc/gatepup
 USER gatepup
 

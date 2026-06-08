@@ -96,6 +96,12 @@ fn check_upstreams(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
                     url: target.url.clone(),
                 });
             }
+            if target.weight == 0 {
+                errors.push(ValidationError::ZeroWeight {
+                    upstream: upstream.name.clone(),
+                    url: target.url.clone(),
+                });
+            }
         }
 
         if let Some(hc) = &upstream.health_check {
@@ -296,6 +302,17 @@ mod tests {
                 interval_ms: 1000,
             })
         );
+    }
+
+    #[test]
+    fn rejects_zero_weight_target() {
+        let mut cfg = valid_config();
+        cfg.upstreams[0].targets[0].weight = 0;
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::ZeroWeight {
+            upstream: "api".to_string(),
+            url: "http://api-1:4000".to_string(),
+        }));
     }
 
     #[test]

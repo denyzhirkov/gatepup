@@ -45,6 +45,30 @@ async fn spawn_backend() -> u16 {
     port
 }
 
+/// A backend that answers `200 <label>` on every request, to identify which
+/// target served a request in load-balancing tests.
+async fn spawn_labeled_backend(label: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| async move {
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                        label.as_bytes(),
+                    ))))
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    port
+}
+
 /// A backend that waits `delay_ms` before answering `200 slow-ok`. Used to keep
 /// a request reliably in-flight while a shutdown is triggered.
 async fn spawn_slow_backend(delay_ms: u64) -> u16 {
@@ -355,6 +379,47 @@ async fn active_checks_eject_then_recover() {
     // Flip backend healthy → active probe recovers it → 200.
     healthy.store(true, Ordering::Relaxed);
     wait_for_status(proxy_port, 200, "after recovery").await;
+}
+
+#[tokio::test]
+async fn weighted_round_robin_distributes_by_weight() {
+    let heavy = spawn_labeled_backend("heavy").await; // weight 3
+    let light = spawn_labeled_backend("light").await; // weight 1
+    let proxy_port = free_port();
+
+    let mut cfg = config(proxy_port, None, heavy);
+    cfg.upstreams[0].targets = vec![
+        TargetConfig {
+            url: format!("http://127.0.0.1:{heavy}"),
+            weight: 3,
+        },
+        TargetConfig {
+            url: format!("http://127.0.0.1:{light}"),
+            weight: 1,
+        },
+    ];
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let mut heavy_hits = 0;
+    let mut light_hits = 0;
+    for _ in 0..80 {
+        let body = get(proxy_port)
+            .await
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        match &body[..] {
+            b"heavy" => heavy_hits += 1,
+            b"light" => light_hits += 1,
+            other => panic!("unexpected body: {:?}", other),
+        }
+    }
+    // 3:1 over 80 requests (schedule length 4) is deterministic.
+    assert_eq!(heavy_hits, 60, "heavy should get 3/4");
+    assert_eq!(light_hits, 20, "light should get 1/4");
 }
 
 #[tokio::test]

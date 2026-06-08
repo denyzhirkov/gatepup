@@ -63,4 +63,7 @@ pub enum ValidationError {
 
     #[error("timeout {field:?} must be greater than zero")]
     ZeroTimeout { field: &'static str },
+
+    #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
+    ZeroWeight { upstream: String, url: String },
 }

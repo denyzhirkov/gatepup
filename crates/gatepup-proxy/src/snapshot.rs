@@ -33,6 +33,10 @@ pub(crate) struct UpstreamRuntime {
     pub(crate) targets: Vec<TargetRuntime>,
     /// Active-health settings when health management is enabled for this upstream.
     pub(crate) health: Option<HealthCheckSettings>,
+    /// Precomputed weighted schedule: target indices, each appearing in
+    /// proportion to its weight (gcd-reduced, interleaved). Equal weights reduce
+    /// to plain round-robin. Indexed lock-free via `next`.
+    schedule: Vec<usize>,
     next: AtomicUsize,
 }
 
@@ -42,22 +46,59 @@ pub(crate) struct TargetRuntime {
 }
 
 impl UpstreamRuntime {
-    /// Round-robin over the healthy targets. Returns `None` when every target
-    /// is unhealthy.
+    /// Weighted round-robin over the healthy targets. Walks the schedule from the
+    /// next position, skipping unhealthy targets; returns `None` only when every
+    /// target is unhealthy. Unhealthy targets are simply skipped, so traffic
+    /// redistributes across the remaining targets in proportion to their weights.
     pub(crate) fn pick_target(&self) -> Option<&TargetRuntime> {
-        let n = self.targets.len();
-        if n == 0 {
+        let len = self.schedule.len();
+        if len == 0 {
             return None;
         }
-        for _ in 0..n {
-            let idx = self.next.fetch_add(1, Ordering::Relaxed) % n;
-            let target = &self.targets[idx];
+        for _ in 0..len {
+            let slot = self.next.fetch_add(1, Ordering::Relaxed) % len;
+            let target = &self.targets[self.schedule[slot]];
             if target.state.is_healthy() {
                 return Some(target);
             }
         }
         None
     }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// Build the weighted schedule: each target index repeated `weight / gcd` times,
+/// interleaved so picks rotate smoothly rather than bursting on one target.
+/// Equal weights yield `[0, 1, .., n-1]` (plain round-robin).
+fn build_schedule(weights: &[u32]) -> Vec<usize> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let divisor = weights
+        .iter()
+        .copied()
+        .filter(|&w| w > 0)
+        .fold(0, gcd)
+        .max(1);
+    let mut remaining: Vec<u32> = weights.iter().map(|&w| w / divisor).collect();
+    let total: u32 = remaining.iter().sum();
+    let mut schedule = Vec::with_capacity(total as usize);
+    while (schedule.len() as u32) < total {
+        for (idx, rem) in remaining.iter_mut().enumerate() {
+            if *rem > 0 {
+                schedule.push(idx);
+                *rem -= 1;
+            }
+        }
+    }
+    schedule
 }
 
 /// Read-only route view for the admin API.
@@ -170,6 +211,14 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
             None
         };
 
+        let weights: Vec<u32> = upstream.targets.iter().map(|t| t.weight).collect();
+        let mut schedule = build_schedule(&weights);
+        // Defensive: a validated config has weight >= 1, but never serve an
+        // upstream with targets yet an empty schedule.
+        if schedule.is_empty() && !upstream.targets.is_empty() {
+            schedule = (0..upstream.targets.len()).collect();
+        }
+
         let targets = upstream
             .targets
             .iter()
@@ -183,6 +232,7 @@ pub fn build_snapshot(config: &GatePupConfig) -> Result<RuntimeConfig, ProxyErro
             Arc::new(UpstreamRuntime {
                 targets,
                 health: settings,
+                schedule,
                 next: AtomicUsize::new(0),
             }),
         );
@@ -215,6 +265,10 @@ mod tests {
 
     // Managed health with threshold 1 so a single `observe(false)` ejects.
     fn upstream(urls: &[&str]) -> UpstreamRuntime {
+        weighted_upstream(urls, &vec![1; urls.len()])
+    }
+
+    fn weighted_upstream(urls: &[&str], weights: &[u32]) -> UpstreamRuntime {
         UpstreamRuntime {
             targets: urls
                 .iter()
@@ -224,6 +278,7 @@ mod tests {
                 })
                 .collect(),
             health: None,
+            schedule: build_schedule(weights),
             next: AtomicUsize::new(0),
         }
     }
@@ -261,5 +316,52 @@ mod tests {
     fn pick_target_none_when_no_targets() {
         let u = upstream(&[]);
         assert!(u.pick_target().is_none());
+    }
+
+    #[test]
+    fn build_schedule_equal_weights_is_plain_round_robin() {
+        assert_eq!(build_schedule(&[1, 1, 1]), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn build_schedule_reduces_by_gcd() {
+        // 2:4 -> 1:2 : one slot for target 0, two for target 1.
+        let s = build_schedule(&[2, 4]);
+        assert_eq!(s.iter().filter(|&&i| i == 0).count(), 1);
+        assert_eq!(s.iter().filter(|&&i| i == 1).count(), 2);
+    }
+
+    #[test]
+    fn build_schedule_interleaves_rather_than_bursting() {
+        // 3:1 should not place all of target 0 before target 1.
+        let s = build_schedule(&[3, 1]);
+        assert_eq!(s.iter().filter(|&&i| i == 0).count(), 3);
+        assert_eq!(s.iter().filter(|&&i| i == 1).count(), 1);
+        assert_ne!(s, vec![0, 0, 0, 1], "schedule should be interleaved");
+    }
+
+    #[test]
+    fn weighted_pick_honors_weights() {
+        let u = weighted_upstream(&["a", "b"], &[3, 1]);
+        let mut a = 0;
+        let mut b = 0;
+        for _ in 0..400 {
+            match pick(&u).as_deref() {
+                Some("a") => a += 1,
+                Some("b") => b += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(a + b, 400);
+        assert_eq!(a, 300, "target a should get 3/4 of traffic");
+        assert_eq!(b, 100, "target b should get 1/4 of traffic");
+    }
+
+    #[test]
+    fn weighted_pick_redistributes_when_a_target_is_unhealthy() {
+        let u = weighted_upstream(&["a", "b"], &[3, 1]);
+        u.targets[1].state.observe(false); // eject "b" (the weight-1 target)
+        let all_a = (0..100).filter_map(|_| pick(&u)).all(|url| url == "a");
+        assert!(all_a, "all traffic should go to the only healthy target");
     }
 }
