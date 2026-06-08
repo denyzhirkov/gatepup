@@ -74,6 +74,17 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+## WebSocket
+
+WebSocket (and other HTTP `Upgrade`) requests are proxied automatically — no
+config needed. When a request carries `Connection: upgrade` + `Upgrade:`, GatePup
+forwards the handshake to the chosen upstream target and, on `101 Switching
+Protocols`, tunnels raw bytes bidirectionally for the life of the connection.
+
+- The upstream is reached over plain HTTP (TLS to the upstream is not supported).
+- Upgrade requests are not retried.
+- Each upgraded connection increments `gatepup_websocket_connections_total`.
+
 ## Hot reload
 
 Send `SIGHUP` to reload the config file without dropping connections:
