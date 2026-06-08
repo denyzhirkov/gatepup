@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-admin"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-bench"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "http",
@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "gatepup-core",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "gatepup-admin",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-observability"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.18",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "gatepup-proxy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "bytes",
