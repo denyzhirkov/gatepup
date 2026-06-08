@@ -6,11 +6,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use gatepup_config::{
     AppConfig, GatePupConfig, HealthCheckConfig, ListenerConfig, MatchConfig, Protocol,
-    RetryConfig, RouteConfig, TargetConfig, UpstreamConfig,
+    RetryConfig, RouteConfig, TargetConfig, TlsConfig, UpstreamConfig,
 };
 use gatepup_observability::Metrics;
-use http::Method;
-use http::{Request, Response};
+use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -19,6 +18,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -338,6 +340,99 @@ fn retry_policy(methods: &[&str], retry_on: &[&str], attempts: u32) -> RetryConf
         methods: methods.iter().map(|m| m.to_string()).collect(),
         retry_on: retry_on.iter().map(|c| c.to_string()).collect(),
     }
+}
+
+fn write_temp_file(content: &str, label: &str) -> String {
+    use std::io::Write;
+    use std::sync::atomic::AtomicU32;
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("gatepup-it-{}-{seq}-{label}", std::process::id()));
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(content.as_bytes())
+        .unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// Generate a self-signed cert for `localhost`; return (cert path, key path, cert DER).
+fn self_signed() -> (String, String, CertificateDer<'static>) {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_path = write_temp_file(&cert.cert.pem(), "cert.pem");
+    let key_path = write_temp_file(&cert.key_pair.serialize_pem(), "key.pem");
+    (cert_path, key_path, cert.cert.der().clone())
+}
+
+fn config_tls(proxy_port: u16, cert: &str, key: &str, backend_port: u16) -> GatePupConfig {
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.listeners[0].protocol = Protocol::Https;
+    cfg.listeners[0].tls = Some(TlsConfig {
+        cert: cert.to_string(),
+        key: key.to_string(),
+    });
+    cfg
+}
+
+/// HTTPS GET over a TLS client that trusts `cert_der`. Returns (status, body).
+async fn tls_get(port: u16, cert_der: CertificateDer<'static>) -> (StatusCode, String) {
+    let mut roots = RootCertStore::empty();
+    roots.add(cert_der).unwrap();
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+    let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let domain = ServerName::try_from("localhost").unwrap();
+    let tls = connector.connect(domain, tcp).await.unwrap();
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let req = Request::builder()
+        .uri("/")
+        .header("host", "localhost")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+#[tokio::test]
+async fn tls_listener_proxies_and_sets_https_proto() {
+    let backend = spawn_header_echo_backend().await;
+    let (cert_path, key_path, cert_der) = self_signed();
+    let proxy_port = free_port();
+    spawn_proxy(config_tls(proxy_port, &cert_path, &key_path, backend)).await;
+    wait_until_listening(proxy_port).await;
+
+    let (status, body) = tls_get(proxy_port, cert_der).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.to_lowercase().contains("x-forwarded-proto: https"),
+        "upstream did not see https proto; body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn https_listener_with_missing_cert_fails_to_build() {
+    let cfg = config_tls(
+        free_port(),
+        "/no/such/cert.pem",
+        "/no/such/key.pem",
+        free_port(),
+    );
+    assert!(gatepup_proxy::build_snapshot(&cfg).is_err());
 }
 
 #[tokio::test]
