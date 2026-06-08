@@ -74,6 +74,30 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+## Retries
+
+Retries are opt-in per upstream. When enabled, a failed attempt is retried onto a
+*different* target (weighted round-robin advances):
+
+```json
+"retries": {
+  "enabled": true,
+  "attempts": 2,
+  "methods": ["GET", "HEAD", "OPTIONS"],
+  "retryOn": ["connect_error", "upstream_5xx"]
+}
+```
+
+- `attempts` is the max **total** tries (≥ 1).
+- Only `methods` are retried — default is idempotent only. Listing non-idempotent
+  methods (POST/PUT/PATCH/DELETE) is at your own risk.
+- `retryOn` accepts `connect_error`, `connect_timeout`, `upstream_5xx`. An overall
+  request timeout (`requestTimeoutMs`) is **never** retried — the backend may have
+  already processed it.
+- To retry, the request body is buffered (bounded to 64 KiB). Larger bodies (and
+  non-retryable methods) stream through with a single attempt.
+- Retries increment the `gatepup_upstream_retries_total` metric.
+
 ## Docker
 
 ```bash

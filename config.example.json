@@ -67,6 +67,12 @@
         "timeoutMs": 1000,
         "healthyThreshold": 2,
         "unhealthyThreshold": 3
+      },
+      "retries": {
+        "enabled": true,
+        "attempts": 2,
+        "methods": ["GET", "HEAD", "OPTIONS"],
+        "retryOn": ["connect_error", "upstream_5xx"]
       }
     }
   ],
