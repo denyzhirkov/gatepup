@@ -58,8 +58,13 @@ the dead target was ejected; the target recovered after it was restarted.
 
 Under sustained 60s load (c=200, ~70k rps, 4.24M requests): RSS held a flat
 plateau (~19.8 MB) for the first ~40s; FDs stayed bounded (~415) and were
-reclaimed after load (→157). No request-scoped leak observed. A longer soak
-(10–30 min) is recommended before production sign-off.
+reclaimed after load (→157).
+
+A **10-minute soak** (c=200, ~60k rps, **36.1M requests**) confirmed no leak:
+100% success, 0 panics; RSS reached a bounded ~50 MB ceiling and then oscillated
+**up and down** (~42–49 MB) rather than growing monotonically — allocator
+high-water, not a leak. FDs stayed bounded. Memory behavior under sustained load
+is healthy.
 
 ### Graceful shutdown under load
 
