@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -9,6 +10,7 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio_rustls::TlsAcceptor;
 
 /// Max time to drain in-flight connections after a shutdown signal before
 /// forcing exit. Bounds shutdown so a stuck connection can't hang forever.
@@ -20,16 +22,28 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 use crate::error::ProxyError;
 use crate::health::{build_health_client, run_health_checks};
 use crate::proxy::{build_client, handle, ProxyClient};
-use crate::snapshot::{ListenerRuntime, RuntimeConfig};
+use crate::snapshot::RuntimeConfig;
+use crate::SharedConfig;
 
-/// Serve all listeners and run active health checks until `shutdown` fires.
-/// Binds synchronously so bind failures surface immediately. The shared
-/// `metrics` are incremented from the request path.
+/// Serve a fixed snapshot (no reload). Wraps it in a swap cell and delegates to
+/// [`serve_shared`]; used standalone and in tests.
 pub async fn serve(
     snapshot: Arc<RuntimeConfig>,
     metrics: Arc<Metrics>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
+    serve_shared(Arc::new(ArcSwap::from(snapshot)), metrics, shutdown).await
+}
+
+/// Serve from a shared, swappable snapshot. Listener bind addresses and TLS
+/// acceptors are fixed from the initial snapshot; routing/upstreams are read
+/// from the current snapshot per request, so a reload takes effect immediately.
+pub async fn serve_shared(
+    shared: SharedConfig,
+    metrics: Arc<Metrics>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), ProxyError> {
+    let snapshot = shared.load_full();
     let client = build_client(snapshot.connect_timeout);
 
     let mut handles = Vec::with_capacity(snapshot.listeners.len());
@@ -45,15 +59,17 @@ pub async fn serve(
 
         handles.push(tokio::spawn(accept_loop(
             tcp,
-            listener.clone(),
-            snapshot.clone(),
+            Arc::from(listener.name.as_str()),
+            listener.tls.clone(),
+            shared.clone(),
             client.clone(),
             metrics.clone(),
             shutdown.clone(),
         )));
     }
 
-    // Active health checks for upstreams that opted in.
+    // Active health checks for upstreams that opted in (from the initial
+    // snapshot; reload-time health lifecycle is handled by the reload path).
     let health_client = build_health_client(snapshot.connect_timeout);
     for (name, upstream) in &snapshot.upstreams {
         if let Some(settings) = upstream.health.clone() {
@@ -93,36 +109,39 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
 
 async fn accept_loop(
     tcp: TcpListener,
-    listener: Arc<ListenerRuntime>,
-    config: Arc<RuntimeConfig>,
+    listener_name: Arc<str>,
+    tls: Option<TlsAcceptor>,
+    shared: SharedConfig,
     client: ProxyClient,
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let graceful = GracefulShutdown::new();
+    let is_tls = tls.is_some();
 
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             accepted = tcp.accept() => match accepted {
                 Ok((stream, remote)) => {
-                    let svc_listener = listener.clone();
-                    let config = config.clone();
+                    let listener_name = listener_name.clone();
+                    let shared = shared.clone();
                     let client = client.clone();
                     let metrics = metrics.clone();
                     let service = service_fn(move |req| {
-                        let listener = svc_listener.clone();
-                        let config = config.clone();
+                        let listener_name = listener_name.clone();
+                        let shared = shared.clone();
                         let client = client.clone();
                         let metrics = metrics.clone();
                         async move {
                             Ok::<_, Infallible>(
-                                handle(req, listener, config, client, metrics, remote).await,
+                                handle(req, &listener_name, is_tls, shared, client, metrics, remote)
+                                    .await,
                             )
                         }
                     });
 
-                    match &listener.tls {
+                    match &tls {
                         // TLS: complete the handshake (bounded) before serving so the
                         // connection joins the graceful-drain set. Handshakes run on the
                         // accept loop for now — offloading them is a hardening follow-up.
@@ -173,10 +192,10 @@ async fn accept_loop(
     drop(tcp);
     tokio::select! {
         _ = graceful.shutdown() => {
-            tracing::info!(listener = %listener.name, "drained in-flight connections");
+            tracing::info!(listener = %listener_name, "drained in-flight connections");
         }
         _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
-            tracing::warn!(listener = %listener.name, "drain timed out, forcing shutdown");
+            tracing::warn!(listener = %listener_name, "drain timed out, forcing shutdown");
         }
     }
 }

@@ -1,9 +1,11 @@
-//! Proxy runtime: immutable config snapshot, route matching, and the
-//! hyper-based HTTP server that forwards requests to upstream targets.
+//! Proxy runtime: an immutable config snapshot behind a lock-free swap cell,
+//! route matching, and the hyper-based HTTP server that forwards requests to
+//! upstream targets.
 //!
-//! The runtime reads an `Arc<RuntimeConfig>` snapshot built once from a
-//! validated [`gatepup_config::GatePupConfig`]. Hot-swapping the snapshot
-//! (config reload) is a later concern; the structure is already immutable.
+//! The runtime reads an `Arc<RuntimeConfig>` snapshot built from a validated
+//! [`gatepup_config::GatePupConfig`]. The snapshot lives in a [`SharedConfig`]
+//! ([`arc_swap::ArcSwap`]) so it can be hot-swapped on config reload: handlers
+//! load the current snapshot per request; in-flight requests keep the old one.
 
 mod error;
 mod health;
@@ -13,9 +15,15 @@ mod server;
 mod snapshot;
 mod tls;
 
+use std::sync::Arc;
+
 pub use error::ProxyError;
-pub use server::{run, serve};
+pub use server::{run, serve, serve_shared};
 pub use snapshot::{build_snapshot, RouteView, RuntimeConfig, TargetView, UpstreamView};
 
 /// Boxed error used as the unified error type for response bodies.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The runtime config snapshot behind a lock-free swap cell. Reload stores a new
+/// snapshot; request handlers load the current one per request.
+pub type SharedConfig = Arc<arc_swap::ArcSwap<RuntimeConfig>>;

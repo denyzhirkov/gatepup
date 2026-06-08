@@ -17,8 +17,8 @@ use hyper_util::rt::TokioExecutor;
 
 use gatepup_observability::Metrics;
 
-use crate::snapshot::{ListenerRuntime, RuntimeConfig};
-use crate::BoxError;
+use crate::snapshot::RuntimeConfig;
+use crate::{BoxError, SharedConfig};
 
 /// Max request body buffered to make a request replayable for retries. Idempotent
 /// methods are normally body-less; larger bodies fall back to a single streamed
@@ -129,8 +129,9 @@ struct Forwarded {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
     req: Request<Incoming>,
-    listener: Arc<ListenerRuntime>,
-    config: Arc<RuntimeConfig>,
+    listener_name: &str,
+    is_tls: bool,
+    shared: SharedConfig,
     client: ProxyClient,
     metrics: Arc<Metrics>,
     remote: SocketAddr,
@@ -140,17 +141,14 @@ pub(crate) async fn handle(
     let host = request_host(&req);
     let method = req.method().clone();
     let path = req.uri().path().to_string();
-    let scheme = if listener.tls.is_some() {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = if is_tls { "https" } else { "http" };
+    let snapshot = shared.load_full();
 
     metrics.inc_requests();
     let (response, route, upstream) = match forward(
         req,
-        &listener,
-        &config,
+        &snapshot,
+        listener_name,
         &client,
         &metrics,
         &host,
@@ -192,8 +190,8 @@ pub(crate) async fn handle(
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     req: Request<Incoming>,
-    listener: &ListenerRuntime,
-    config: &RuntimeConfig,
+    snapshot: &RuntimeConfig,
+    listener_name: &str,
     client: &ProxyClient,
     metrics: &Metrics,
     host: &str,
@@ -201,13 +199,20 @@ async fn forward(
     remote: SocketAddr,
     request_id: &str,
 ) -> Result<Forwarded, GatewayError> {
-    let route = listener
-        .router
+    // The listener's router comes from the current snapshot (it may have been
+    // hot-swapped since this connection was accepted).
+    let router = snapshot
+        .listeners
+        .iter()
+        .find(|l| l.name == listener_name)
+        .map(|l| &l.router)
+        .ok_or(GatewayError::RouteNotFound)?;
+    let route = router
         .match_route(host, req.uri().path())
         .ok_or(GatewayError::RouteNotFound)?;
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
-    let upstream = config
+    let upstream = snapshot
         .upstreams
         .get(&route.upstream)
         .ok_or(GatewayError::UpstreamMissing)?;
@@ -251,7 +256,7 @@ async fn forward(
         let is_last = attempt + 1 == max_attempts;
 
         // Passive health: feed each proxied outcome into the target's state.
-        match tokio::time::timeout(config.request_timeout, client.request(upstream_req)).await {
+        match tokio::time::timeout(snapshot.request_timeout, client.request(upstream_req)).await {
             // Overall request timeout is NOT retried (the backend may have
             // already processed the request).
             Err(_elapsed) => {
