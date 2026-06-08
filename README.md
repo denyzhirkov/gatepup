@@ -156,11 +156,20 @@ curl localhost/            # proxied to the demo upstream
 curl localhost:8080/health
 ```
 
-The image is multi-stage, runs as a non-root user (granted
-`cap_net_bind_service` so it can bind port 80), ships a default config at
-`/etc/gatepup/config.json` (override by mounting your own), exposes ports 80 and
-8080, and has a container `HEALTHCHECK` hitting the admin `/health`. `docker
-stop` shuts down gracefully (SIGTERM drains in-flight requests).
+The image is a multi-stage **Alpine** build (static musl binary) — **~25 MB**. It
+runs as a non-root user (granted `cap_net_bind_service` so it can bind port 80),
+ships a default config at `/etc/gatepup/config.json` (override by mounting your
+own, or run config-free via `GATEPUP_*` env vars — see *Configuration via
+environment*), exposes ports 80 and 8080, and has a container `HEALTHCHECK`
+(busybox `wget`) hitting the admin `/health`. `docker stop` shuts down gracefully
+(SIGTERM drains in-flight requests).
+
+```bash
+# config-free container (no mounted file)
+docker run -p 80:80 -p 8080:8080 \
+  -e GATEPUP_LISTEN=0.0.0.0:80 -e GATEPUP_UPSTREAM=http://api:4000 \
+  -e GATEPUP_ADMIN=0.0.0.0:8080 gatepup/gatepup:latest
+```
 
 > The compose demo binds the admin API to `0.0.0.0:8080` so it's reachable from
 > the host. The secure default is `127.0.0.1`; don't expose the admin port
