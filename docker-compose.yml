@@ -1,0 +1,21 @@
+services:
+  gatepup:
+    build: .
+    image: gatepup/gatepup:latest
+    ports:
+      - "80:80"      # public HTTP proxy
+      - "8080:8080"  # admin + metrics (see note below)
+    volumes:
+      - ./config.docker.json:/etc/gatepup/config.json:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Demo upstream: a tiny server that answers 200 on every path.
+  api:
+    image: traefik/whoami
+    restart: unless-stopped
+
+# NOTE: config.docker.json binds the admin API to 0.0.0.0:8080 so the mapped
+# port is reachable from the host for this demo. The secure default is
+# 127.0.0.1; do not expose the admin port publicly without auth (planned v0.3).

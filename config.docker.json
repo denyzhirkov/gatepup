@@ -1,0 +1,31 @@
+{
+  "app": { "name": "gatepup", "logLevel": "info" },
+  "listeners": [
+    {
+      "name": "public-http",
+      "bind": "0.0.0.0:80",
+      "protocol": "http",
+      "routes": [
+        { "name": "default", "match": { "pathPrefix": "/" }, "upstream": "app" }
+      ]
+    }
+  ],
+  "upstreams": [
+    {
+      "name": "app",
+      "loadBalancing": "round_robin",
+      "targets": [{ "url": "http://api:80" }],
+      "healthCheck": {
+        "enabled": true,
+        "path": "/",
+        "intervalSeconds": 5,
+        "timeoutMs": 1000,
+        "healthyThreshold": 2,
+        "unhealthyThreshold": 3
+      }
+    }
+  ],
+  "timeouts": { "connectTimeoutMs": 5000, "requestTimeoutMs": 30000 },
+  "admin": { "enabled": true, "bind": "0.0.0.0:8080" },
+  "metrics": { "enabled": true, "path": "/metrics" }
+}

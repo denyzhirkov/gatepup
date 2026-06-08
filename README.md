@@ -74,12 +74,32 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+## Docker
+
+```bash
+docker compose up --build
+# proxy on http://localhost:80, admin/metrics on http://localhost:8080
+curl localhost/            # proxied to the demo upstream
+curl localhost:8080/health
+```
+
+The image is multi-stage, runs as a non-root user (granted
+`cap_net_bind_service` so it can bind port 80), ships a default config at
+`/etc/gatepup/config.json` (override by mounting your own), exposes ports 80 and
+8080, and has a container `HEALTHCHECK` hitting the admin `/health`. `docker
+stop` shuts down gracefully (SIGTERM drains in-flight requests).
+
+> The compose demo binds the admin API to `0.0.0.0:8080` so it's reachable from
+> the host. The secure default is `127.0.0.1`; don't expose the admin port
+> publicly without auth.
+
 ## Config
 
 See [`config.example.json`](./config.example.json) for a full example. A config
 declares `listeners` (with routes that match on host + path prefix), `upstreams`
-(target groups with a load-balancing strategy and optional health checks), and
-optional `admin` / `metrics` sections.
+(target groups with a load-balancing strategy and optional health checks),
+`timeouts` (`connectTimeoutMs` / `requestTimeoutMs`), and optional `admin` /
+`metrics` sections.
 
 ## Development
 
