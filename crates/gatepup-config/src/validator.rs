@@ -15,6 +15,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
     check_unique_upstreams(config, &mut errors);
     check_listeners(config, &upstream_names, &mut errors);
     check_upstreams(config, &mut errors);
+    check_retries(config, &mut errors);
     check_admin(config, &mut errors);
     check_timeouts(config, &mut errors);
 
@@ -160,6 +161,56 @@ fn check_health_timeout(upstream: &str, hc: &HealthCheckConfig, errors: &mut Vec
     }
 }
 
+fn check_retries(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    const METHODS: [&str; 9] = [
+        "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT",
+    ];
+    const RETRY_ON: [&str; 3] = ["connect_error", "connect_timeout", "upstream_5xx"];
+
+    for upstream in &config.upstreams {
+        let Some(retries) = &upstream.retries else {
+            continue;
+        };
+        if !retries.enabled {
+            continue;
+        }
+
+        if retries.attempts < 1 {
+            errors.push(ValidationError::InvalidRetryAttempts {
+                upstream: upstream.name.clone(),
+            });
+        }
+        if retries.methods.is_empty() {
+            errors.push(ValidationError::EmptyRetryList {
+                upstream: upstream.name.clone(),
+                field: "methods",
+            });
+        }
+        if retries.retry_on.is_empty() {
+            errors.push(ValidationError::EmptyRetryList {
+                upstream: upstream.name.clone(),
+                field: "retryOn",
+            });
+        }
+        for method in &retries.methods {
+            if !METHODS.contains(&method.as_str()) {
+                errors.push(ValidationError::InvalidRetryMethod {
+                    upstream: upstream.name.clone(),
+                    method: method.clone(),
+                });
+            }
+        }
+        for condition in &retries.retry_on {
+            if !RETRY_ON.contains(&condition.as_str()) {
+                errors.push(ValidationError::InvalidRetryOn {
+                    upstream: upstream.name.clone(),
+                    value: condition.clone(),
+                });
+            }
+        }
+    }
+}
+
 fn check_admin(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     if let Some(admin) = &config.admin {
         if admin.bind.parse::<SocketAddr>().is_err() {
@@ -208,6 +259,7 @@ mod tests {
             load_balancing: LoadBalancing::RoundRobin,
             targets,
             health_check: None,
+            retries: None,
         }
     }
 
@@ -395,6 +447,71 @@ mod tests {
         assert!(errors.contains(&ValidationError::ZeroWeight {
             upstream: "api".to_string(),
             url: "http://api-1:4000".to_string(),
+        }));
+    }
+
+    fn enabled_retries(attempts: u32, methods: &[&str], retry_on: &[&str]) -> RetryConfig {
+        RetryConfig {
+            enabled: true,
+            attempts,
+            methods: methods.iter().map(|m| m.to_string()).collect(),
+            retry_on: retry_on.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn accepts_valid_retries() {
+        let mut cfg = valid_config();
+        cfg.upstreams[0].retries = Some(enabled_retries(
+            2,
+            &["GET", "HEAD"],
+            &["connect_error", "upstream_5xx"],
+        ));
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn disabled_retries_skip_validation() {
+        let mut cfg = valid_config();
+        // Bogus contents but disabled -> not validated.
+        cfg.upstreams[0].retries = Some(RetryConfig {
+            enabled: false,
+            attempts: 0,
+            methods: vec!["NOPE".to_string()],
+            retry_on: vec!["bogus".to_string()],
+        });
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn rejects_zero_retry_attempts() {
+        let mut cfg = valid_config();
+        cfg.upstreams[0].retries = Some(enabled_retries(0, &["GET"], &["connect_error"]));
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidRetryAttempts {
+            upstream: "api".to_string(),
+        }));
+    }
+
+    #[test]
+    fn rejects_invalid_retry_method() {
+        let mut cfg = valid_config();
+        cfg.upstreams[0].retries = Some(enabled_retries(2, &["FETCH"], &["connect_error"]));
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidRetryMethod {
+            upstream: "api".to_string(),
+            method: "FETCH".to_string(),
+        }));
+    }
+
+    #[test]
+    fn rejects_invalid_retry_on_condition() {
+        let mut cfg = valid_config();
+        cfg.upstreams[0].retries = Some(enabled_retries(2, &["GET"], &["upstream_4xx"]));
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidRetryOn {
+            upstream: "api".to_string(),
+            value: "upstream_4xx".to_string(),
         }));
     }
 

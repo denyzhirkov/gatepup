@@ -113,6 +113,35 @@ pub struct UpstreamConfig {
     pub targets: Vec<TargetConfig>,
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default)]
+    pub retries: Option<RetryConfig>,
+}
+
+/// Retry policy for an upstream. Off unless present and `enabled`. `attempts` is
+/// the max total number of tries (>= 1). Only `methods` (default: idempotent)
+/// are retried, on the conditions in `retryOn`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetryConfig {
+    pub enabled: bool,
+    #[serde(default = "default_retry_attempts")]
+    pub attempts: u32,
+    #[serde(default = "default_retry_methods")]
+    pub methods: Vec<String>,
+    #[serde(default = "default_retry_on")]
+    pub retry_on: Vec<String>,
+}
+
+fn default_retry_attempts() -> u32 {
+    2
+}
+
+fn default_retry_methods() -> Vec<String> {
+    vec!["GET".to_string(), "HEAD".to_string(), "OPTIONS".to_string()]
+}
+
+fn default_retry_on() -> Vec<String> {
+    vec!["connect_error".to_string(), "upstream_5xx".to_string()]
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

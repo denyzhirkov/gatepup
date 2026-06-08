@@ -83,4 +83,19 @@ pub enum ValidationError {
         first: String,
         second: String,
     },
+
+    #[error("upstream {upstream:?} retry attempts must be >= 1")]
+    InvalidRetryAttempts { upstream: String },
+
+    #[error("upstream {upstream:?} has an empty retry {field:?} list")]
+    EmptyRetryList {
+        upstream: String,
+        field: &'static str,
+    },
+
+    #[error("upstream {upstream:?} has invalid retry method {method:?}")]
+    InvalidRetryMethod { upstream: String, method: String },
+
+    #[error("upstream {upstream:?} has invalid retryOn condition {value:?} (expected: connect_error, connect_timeout, upstream_5xx)")]
+    InvalidRetryOn { upstream: String, value: String },
 }

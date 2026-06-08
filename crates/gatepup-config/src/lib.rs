@@ -13,6 +13,7 @@ pub use error::{ConfigError, ValidationError};
 pub use loader::load_from_file;
 pub use model::{
     AdminConfig, AppConfig, GatePupConfig, HealthCheckConfig, ListenerConfig, LoadBalancing,
-    MatchConfig, MetricsConfig, Protocol, RouteConfig, TargetConfig, TimeoutConfig, UpstreamConfig,
+    MatchConfig, MetricsConfig, Protocol, RetryConfig, RouteConfig, TargetConfig, TimeoutConfig,
+    UpstreamConfig,
 };
 pub use validator::validate;
