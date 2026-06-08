@@ -95,6 +95,16 @@ fn check_listeners(
                 }
             }
 
+            if let Some(host) = &route.matcher.host {
+                if host.contains('*') && !is_valid_wildcard_host(host) {
+                    errors.push(ValidationError::InvalidWildcardHost {
+                        listener: listener.name.clone(),
+                        route: route.name.clone(),
+                        host: host.clone(),
+                    });
+                }
+            }
+
             // Two routes with the same effective (host, path prefix) are ambiguous.
             let effective_prefix = route
                 .matcher
@@ -260,6 +270,12 @@ fn check_timeouts(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
             field: "requestTimeoutMs",
         });
     }
+}
+
+/// A wildcard host is valid only as a single leading `*.` label, e.g.
+/// `*.example.com` (no other `*`).
+fn is_valid_wildcard_host(host: &str) -> bool {
+    host.starts_with("*.") && host.len() > 2 && !host[2..].contains('*')
 }
 
 fn is_valid_target_url(raw: &str) -> bool {
@@ -450,6 +466,25 @@ mod tests {
             listener: "public".to_string(),
             route: "api".to_string(),
             prefix: "api".to_string(),
+        }));
+    }
+
+    #[test]
+    fn accepts_valid_wildcard_host() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].matcher.host = Some("*.example.com".to_string());
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn rejects_invalid_wildcard_host() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].matcher.host = Some("api.*.com".to_string());
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidWildcardHost {
+            listener: "public".to_string(),
+            route: "api".to_string(),
+            host: "api.*.com".to_string(),
         }));
     }
 

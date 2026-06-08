@@ -100,6 +100,13 @@ pub enum ValidationError {
         second: String,
     },
 
+    #[error("route {route:?} in listener {listener:?} has invalid wildcard host {host:?} (only a leading '*.' wildcard is allowed, e.g. *.example.com)")]
+    InvalidWildcardHost {
+        listener: String,
+        route: String,
+        host: String,
+    },
+
     #[error("upstream {upstream:?} retry attempts must be >= 1")]
     InvalidRetryAttempts { upstream: String },
 
