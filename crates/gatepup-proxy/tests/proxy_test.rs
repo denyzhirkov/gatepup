@@ -10,7 +10,7 @@ use gatepup_config::{
 };
 use gatepup_observability::Metrics;
 use http::{Method, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -70,6 +70,61 @@ async fn spawn_labeled_backend(label: &'static str) -> u16 {
         }
     });
     port
+}
+
+/// A backend that completes a WebSocket-style upgrade (101) and then echoes
+/// every byte received on the upgraded connection.
+async fn spawn_ws_echo_backend() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|mut req: Request<hyper::body::Incoming>| async move {
+                    if req.headers().contains_key(http::header::UPGRADE) {
+                        let upgrade = hyper::upgrade::on(&mut req);
+                        tokio::spawn(async move {
+                            if let Ok(upgraded) = upgrade.await {
+                                let (mut r, mut w) = tokio::io::split(TokioIo::new(upgraded));
+                                let _ = tokio::io::copy(&mut r, &mut w).await;
+                            }
+                        });
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(101)
+                                .header("connection", "upgrade")
+                                .header("upgrade", "websocket")
+                                .body(Full::new(Bytes::new()))
+                                .unwrap(),
+                        )
+                    } else {
+                        Ok(Response::new(Full::new(Bytes::from_static(b"not-upgrade"))))
+                    }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+fn upgrade_request(host: &str) -> Request<Empty<Bytes>> {
+    Request::builder()
+        .uri("/")
+        .header("host", host)
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(Empty::<Bytes>::new())
+        .unwrap()
 }
 
 /// A backend that waits `delay_ms` before answering `200 slow-ok`. Used to keep
@@ -729,6 +784,62 @@ async fn retries_exhausted_returns_error() {
     assert_eq!(resp.status(), 502);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&body).contains("upstream_connect_error"));
+}
+
+#[tokio::test]
+async fn proxies_websocket_upgrade_and_tunnels_bytes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let backend = spawn_ws_echo_backend().await;
+    let proxy_port = free_port();
+    spawn_proxy(config(proxy_port, None, backend)).await;
+    wait_until_listening(proxy_port).await;
+
+    let tcp = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+
+    let mut resp = sender
+        .send_request(upgrade_request("ws.local"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 101, "proxy should relay the 101");
+
+    // Tunnel bytes through: client -> proxy -> backend echo -> back.
+    let upgraded = hyper::upgrade::on(&mut resp).await.unwrap();
+    let mut io = TokioIo::new(upgraded);
+    io.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    io.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping", "bytes should tunnel both ways");
+}
+
+#[tokio::test]
+async fn non_101_upgrade_response_is_relayed() {
+    let backend = spawn_backend().await; // answers 200 to everything, ignores upgrade
+    let proxy_port = free_port();
+    spawn_proxy(config(proxy_port, None, backend)).await;
+    wait_until_listening(proxy_port).await;
+
+    let tcp = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+
+    let resp = sender.send_request(upgrade_request("x")).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "non-101 upgrade response is relayed as-is"
+    );
+    assert_eq!(body_of(resp).await, "backend-ok");
 }
 
 #[tokio::test]

@@ -9,11 +9,12 @@ use http::request::Parts;
 use http::uri::PathAndQuery;
 use http::{Request, Response, StatusCode, Uri};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::net::TcpStream;
 
 use gatepup_observability::Metrics;
 
@@ -145,19 +146,33 @@ pub(crate) async fn handle(
     let snapshot = shared.load_full();
 
     metrics.inc_requests();
-    let (response, route, upstream) = match forward(
-        req,
-        &snapshot,
-        listener_name,
-        &client,
-        &metrics,
-        &host,
-        scheme,
-        remote,
-        &request_id,
-    )
-    .await
-    {
+    let outcome = if is_upgrade(&req) {
+        handle_upgrade(
+            req,
+            &snapshot,
+            listener_name,
+            &host,
+            scheme,
+            remote,
+            &request_id,
+            &metrics,
+        )
+        .await
+    } else {
+        forward(
+            req,
+            &snapshot,
+            listener_name,
+            &client,
+            &metrics,
+            &host,
+            scheme,
+            remote,
+            &request_id,
+        )
+        .await
+    };
+    let (response, route, upstream) = match outcome {
         Ok(f) => {
             metrics.inc_upstream_requests();
             (f.response, Some(f.route), Some(f.upstream))
@@ -289,6 +304,168 @@ async fn forward(
     }
 
     Err(last_err)
+}
+
+/// Hop-by-hop headers stripped from an upgrade request — note `connection` and
+/// `upgrade` are intentionally PRESERVED so the upstream sees the handshake.
+const UPGRADE_STRIP: &[&str] = &[
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+];
+
+/// True when the request is an HTTP Upgrade (e.g. WebSocket): `Connection`
+/// contains an `upgrade` token and an `Upgrade` header is present.
+fn is_upgrade<B>(req: &Request<B>) -> bool {
+    let headers = req.headers();
+    let connection_upgrade = headers
+        .get(header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+        })
+        .unwrap_or(false);
+    connection_upgrade && headers.contains_key(header::UPGRADE)
+}
+
+/// Proxy an Upgrade request: forward it to the chosen target over a one-off
+/// connection (the pooled client can't surface an upgrade), and on a 101 tunnel
+/// raw bytes bidirectionally between client and upstream.
+#[allow(clippy::too_many_arguments)]
+async fn handle_upgrade(
+    mut req: Request<Incoming>,
+    snapshot: &RuntimeConfig,
+    listener_name: &str,
+    host: &str,
+    scheme: &str,
+    remote: SocketAddr,
+    request_id: &str,
+    metrics: &Metrics,
+) -> Result<Forwarded, GatewayError> {
+    let router = snapshot
+        .listeners
+        .iter()
+        .find(|l| l.name == listener_name)
+        .map(|l| &l.router)
+        .ok_or(GatewayError::RouteNotFound)?;
+    let route = router
+        .match_route(host, req.uri().path())
+        .ok_or(GatewayError::RouteNotFound)?;
+    let route_name = route.name.clone();
+    let upstream_name = route.upstream.clone();
+    let upstream = snapshot
+        .upstreams
+        .get(&route.upstream)
+        .ok_or(GatewayError::UpstreamMissing)?;
+    let target = upstream
+        .pick_target()
+        .ok_or(GatewayError::NoHealthyUpstream)?;
+    let (target_host, target_port) =
+        parse_authority(&target.url).ok_or(GatewayError::BadGateway)?;
+    let authority = format!("{target_host}:{target_port}");
+
+    // The client's upgraded IO becomes available after we return the 101.
+    let client_upgrade = hyper::upgrade::on(&mut req);
+    let upstream_req = build_upgrade_request(&req, &authority, host, scheme, remote, request_id)
+        .ok_or(GatewayError::BadGateway)?;
+
+    let tcp = match TcpStream::connect((target_host.as_str(), target_port)).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            target.state.observe(false);
+            return Err(GatewayError::UpstreamConnect);
+        }
+    };
+    let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
+        Ok(pair) => pair,
+        Err(_) => {
+            target.state.observe(false);
+            return Err(GatewayError::UpstreamConnect);
+        }
+    };
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+
+    let mut resp = match sender.send_request(upstream_req).await {
+        Ok(resp) => resp,
+        Err(_) => {
+            target.state.observe(false);
+            return Err(GatewayError::UpstreamConnect);
+        }
+    };
+
+    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        target.state.observe(true);
+        metrics.inc_websocket();
+        let upstream_upgrade = hyper::upgrade::on(&mut resp);
+        tokio::spawn(async move {
+            if let (Ok(client_io), Ok(upstream_io)) = (client_upgrade.await, upstream_upgrade.await)
+            {
+                let mut client_io = TokioIo::new(client_io);
+                let mut upstream_io = TokioIo::new(upstream_io);
+                let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
+            }
+        });
+        // Relay the 101 (with the upstream's handshake headers) to the client.
+        let (parts, _body) = resp.into_parts();
+        let mut response = Response::new(box_bytes(Bytes::new()));
+        *response.status_mut() = parts.status;
+        *response.headers_mut() = parts.headers;
+        Ok(Forwarded {
+            response,
+            route: route_name,
+            upstream: upstream_name,
+        })
+    } else {
+        // Upstream declined the upgrade: relay its response normally.
+        target.state.observe(resp.status().as_u16() < 500);
+        Ok(Forwarded {
+            response: resp.map(box_incoming),
+            route: route_name,
+            upstream: upstream_name,
+        })
+    }
+}
+
+fn parse_authority(target_url: &str) -> Option<(String, u16)> {
+    let uri: Uri = target_url.parse().ok()?;
+    let host = uri.host()?.to_string();
+    let port = uri.port_u16().unwrap_or(80);
+    Some((host, port))
+}
+
+fn build_upgrade_request(
+    req: &Request<Incoming>,
+    authority: &str,
+    fwd_host: &str,
+    scheme: &str,
+    remote: SocketAddr,
+    request_id: &str,
+) -> Option<Request<Empty<Bytes>>> {
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+    let mut headers = req.headers().clone();
+    for name in UPGRADE_STRIP {
+        headers.remove(*name);
+    }
+    headers.remove(header::HOST);
+    set_header(&mut headers, "host", authority);
+    append_forwarded_for(&mut headers, remote.ip());
+    set_header(&mut headers, "x-forwarded-host", fwd_host);
+    set_header(&mut headers, "x-forwarded-proto", scheme);
+    set_header(&mut headers, "x-request-id", request_id);
+
+    let mut builder = Request::builder().method(req.method().clone()).uri(path);
+    *builder.headers_mut()? = headers;
+    builder.body(Empty::<Bytes>::new()).ok()
 }
 
 /// Build one upstream request for `target_url` from the rewritten parts template.
@@ -525,5 +702,34 @@ mod tests {
         let a = generate_request_id();
         let b = generate_request_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn detects_upgrade_requests() {
+        let mut req = Request::builder().uri("/").body(()).unwrap();
+        assert!(!is_upgrade(&req), "plain request is not an upgrade");
+
+        req.headers_mut().insert(
+            header::CONNECTION,
+            HeaderValue::from_static("keep-alive, Upgrade"),
+        );
+        assert!(!is_upgrade(&req), "upgrade token without Upgrade header");
+
+        req.headers_mut()
+            .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        assert!(is_upgrade(&req), "connection: upgrade + upgrade header");
+    }
+
+    #[test]
+    fn parse_authority_splits_host_and_port() {
+        assert_eq!(
+            parse_authority("http://backend:4000"),
+            Some(("backend".to_string(), 4000))
+        );
+        assert_eq!(
+            parse_authority("http://1.2.3.4"),
+            Some(("1.2.3.4".to_string(), 80))
+        );
+        assert_eq!(parse_authority("not a url"), None);
     }
 }

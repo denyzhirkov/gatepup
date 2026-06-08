@@ -21,6 +21,7 @@ pub struct Metrics {
     route_not_found_total: IntCounter,
     upstream_healthy: IntGaugeVec,
     config_reloads_total: IntCounterVec,
+    websocket_connections_total: IntCounter,
 }
 
 impl Metrics {
@@ -59,6 +60,10 @@ impl Metrics {
             Opts::new("gatepup_config_reloads_total", "Config reload attempts"),
             &["result"],
         )?;
+        let websocket_connections_total = IntCounter::new(
+            "gatepup_websocket_connections_total",
+            "Upgraded (WebSocket) connections tunneled",
+        )?;
 
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(request_duration.clone()))?;
@@ -68,6 +73,7 @@ impl Metrics {
         registry.register(Box::new(route_not_found_total.clone()))?;
         registry.register(Box::new(upstream_healthy.clone()))?;
         registry.register(Box::new(config_reloads_total.clone()))?;
+        registry.register(Box::new(websocket_connections_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -79,6 +85,7 @@ impl Metrics {
             route_not_found_total,
             upstream_healthy,
             config_reloads_total,
+            websocket_connections_total,
         })
     }
 
@@ -104,6 +111,10 @@ impl Metrics {
 
     pub fn inc_route_not_found(&self) {
         self.route_not_found_total.inc();
+    }
+
+    pub fn inc_websocket(&self) {
+        self.websocket_connections_total.inc();
     }
 
     pub fn inc_config_reload(&self, success: bool) {

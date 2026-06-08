@@ -7,9 +7,9 @@ use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 /// Max time to drain in-flight connections after a shutdown signal before
@@ -120,35 +120,28 @@ async fn accept_loop(
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let graceful = GracefulShutdown::new();
     let is_tls = tls.is_some();
+    // Connections are served with upgrades (WebSocket), so we drain them
+    // manually (hyper_util's graceful set doesn't cover upgradeable connections):
+    // each connection self-`graceful_shutdown`s on the signal; we await the set.
+    let mut conns = JoinSet::new();
 
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             accepted = tcp.accept() => match accepted {
                 Ok((stream, remote)) => {
-                    let listener_name = listener_name.clone();
-                    let shared = shared.clone();
-                    let client = client.clone();
-                    let metrics = metrics.clone();
-                    let service = service_fn(move |req| {
-                        let listener_name = listener_name.clone();
-                        let shared = shared.clone();
-                        let client = client.clone();
-                        let metrics = metrics.clone();
-                        async move {
-                            Ok::<_, Infallible>(
-                                handle(req, &listener_name, is_tls, shared, client, metrics, remote)
-                                    .await,
-                            )
-                        }
-                    });
-
+                    let ctx = ConnCtx {
+                        listener_name: listener_name.clone(),
+                        shared: shared.clone(),
+                        client: client.clone(),
+                        metrics: metrics.clone(),
+                        is_tls,
+                        remote,
+                        shutdown: shutdown.clone(),
+                    };
                     match &tls {
-                        // TLS: complete the handshake (bounded) before serving so the
-                        // connection joins the graceful-drain set. Handshakes run on the
-                        // accept loop for now — offloading them is a hardening follow-up.
+                        // TLS handshake runs inline (bounded); offloading it is a follow-up.
                         Some(acceptor) => {
                             let tls = match tokio::time::timeout(
                                 HANDSHAKE_TIMEOUT,
@@ -166,24 +159,10 @@ async fn accept_loop(
                                     continue;
                                 }
                             };
-                            let conn = http1::Builder::new()
-                                .serve_connection(TokioIo::new(tls), service);
-                            let watched = graceful.watch(conn);
-                            tokio::spawn(async move {
-                                if let Err(err) = watched.await {
-                                    tracing::debug!(error = %err, "connection closed with error");
-                                }
-                            });
+                            conns.spawn(serve_connection(TokioIo::new(tls), ctx));
                         }
                         None => {
-                            let conn = http1::Builder::new()
-                                .serve_connection(TokioIo::new(stream), service);
-                            let watched = graceful.watch(conn);
-                            tokio::spawn(async move {
-                                if let Err(err) = watched.await {
-                                    tracing::debug!(error = %err, "connection closed with error");
-                                }
-                            });
+                            conns.spawn(serve_connection(TokioIo::new(stream), ctx));
                         }
                     }
                 }
@@ -192,14 +171,74 @@ async fn accept_loop(
         }
     }
 
-    // Stop accepting, then drain in-flight connections (bounded by DRAIN_TIMEOUT).
+    // Stop accepting; each connection self-drains on the shutdown signal. Wait
+    // for the set to empty, bounded by DRAIN_TIMEOUT.
     drop(tcp);
     tokio::select! {
-        _ = graceful.shutdown() => {
+        _ = async { while conns.join_next().await.is_some() {} } => {
             tracing::info!(listener = %listener_name, "drained in-flight connections");
         }
         _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
             tracing::warn!(listener = %listener_name, "drain timed out, forcing shutdown");
+            conns.abort_all();
+        }
+    }
+}
+
+/// Per-connection context captured for serving.
+struct ConnCtx {
+    listener_name: Arc<str>,
+    shared: SharedConfig,
+    client: ProxyClient,
+    metrics: Arc<Metrics>,
+    is_tls: bool,
+    remote: std::net::SocketAddr,
+    shutdown: watch::Receiver<bool>,
+}
+
+/// Serve one connection (with upgrades) until it finishes or shutdown is
+/// signaled, in which case it is gracefully shut down and then awaited.
+async fn serve_connection<I>(io: TokioIo<I>, ctx: ConnCtx)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let ConnCtx {
+        listener_name,
+        shared,
+        client,
+        metrics,
+        is_tls,
+        remote,
+        mut shutdown,
+    } = ctx;
+
+    let service = service_fn(move |req| {
+        let listener_name = listener_name.clone();
+        let shared = shared.clone();
+        let client = client.clone();
+        let metrics = metrics.clone();
+        async move {
+            Ok::<_, Infallible>(
+                handle(req, &listener_name, is_tls, shared, client, metrics, remote).await,
+            )
+        }
+    });
+
+    let conn = http1::Builder::new()
+        .serve_connection(io, service)
+        .with_upgrades();
+    let mut conn = std::pin::pin!(conn);
+    tokio::select! {
+        result = conn.as_mut() => {
+            if let Err(err) = result {
+                tracing::debug!(error = %err, "connection closed with error");
+            }
+        }
+        _ = shutdown.changed() => {
+            conn.as_mut().graceful_shutdown();
+            if let Err(err) = conn.await {
+                tracing::debug!(error = %err, "connection closed with error");
+            }
         }
     }
 }
