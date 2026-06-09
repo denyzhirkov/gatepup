@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::request::Parts;
@@ -193,6 +194,7 @@ async fn prepare_body_source(
 enum GatewayError {
     RouteNotFound,
     Forbidden,
+    Unauthorized,
     TooManyRequests,
     PayloadTooLarge,
     UpstreamMissing,
@@ -207,6 +209,7 @@ impl GatewayError {
         match self {
             GatewayError::RouteNotFound => (StatusCode::NOT_FOUND, "route_not_found"),
             GatewayError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            GatewayError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             GatewayError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             GatewayError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             GatewayError::NoHealthyUpstream => {
@@ -227,6 +230,7 @@ impl GatewayError {
             self,
             GatewayError::RouteNotFound
                 | GatewayError::Forbidden
+                | GatewayError::Unauthorized
                 | GatewayError::TooManyRequests
                 | GatewayError::PayloadTooLarge
         )
@@ -362,6 +366,11 @@ async fn forward(
     if let Some(rl) = &route.rate_limit {
         if !rate_limiter.check(&route.name, client_ip, rl.rate, rl.capacity, Instant::now()) {
             return Err(GatewayError::TooManyRequests);
+        }
+    }
+    if let Some(users) = &route.basic_auth {
+        if !basic_auth_ok(req.headers(), users) {
+            return Err(GatewayError::Unauthorized);
         }
     }
     let route_name = route.name.clone();
@@ -535,6 +544,11 @@ async fn handle_upgrade(
             return Err(GatewayError::TooManyRequests);
         }
     }
+    if let Some(users) = &route.basic_auth {
+        if !basic_auth_ok(req.headers(), users) {
+            return Err(GatewayError::Unauthorized);
+        }
+    }
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
     let upstream = snapshot
@@ -675,6 +689,48 @@ fn build_attempt_request(
     builder.body(body).ok()
 }
 
+/// Validate HTTP Basic credentials against the route's `username -> password`
+/// map. Password comparison is constant-time; a missing/garbled header or
+/// unknown user fails closed.
+fn basic_auth_ok(headers: &HeaderMap, users: &std::collections::HashMap<String, String>) -> bool {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(b64) = value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+        return false;
+    };
+    let Ok(creds) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((user, pass)) = creds.split_once(':') else {
+        return false;
+    };
+    match users.get(user) {
+        Some(expected) => constant_time_eq(pass.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// True when a declared `Content-Length` exceeds the configured cap. `0` means
 /// no cap. Undeclared (e.g. chunked) bodies pass here and are bounded mid-stream
 /// by the [`BodySource`] wrapper instead.
@@ -802,6 +858,12 @@ fn error_response(err: GatewayError, request_id: &str) -> Response<ResponseBody>
     if matches!(err, GatewayError::TooManyRequests) {
         resp.headers_mut()
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    if matches!(err, GatewayError::Unauthorized) {
+        resp.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"restricted\""),
+        );
     }
     resp
 }
@@ -950,6 +1012,48 @@ mod tests {
         let trusted = nets(&["10.0.0.0/8"]);
         let ip = resolve_client_ip(addr("10.0.0.1"), Some("garbage, 203.0.113.7"), &trusted);
         assert_eq!(ip, addr("203.0.113.7"));
+    }
+
+    fn basic_users() -> std::collections::HashMap<String, String> {
+        [("alice".to_string(), "secret".to_string())]
+            .into_iter()
+            .collect()
+    }
+
+    fn basic_header(creds: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(creds);
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {b64}")).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn basic_auth_accepts_valid_credentials() {
+        assert!(basic_auth_ok(&basic_header("alice:secret"), &basic_users()));
+    }
+
+    #[test]
+    fn basic_auth_rejects_wrong_password() {
+        assert!(!basic_auth_ok(&basic_header("alice:nope"), &basic_users()));
+    }
+
+    #[test]
+    fn basic_auth_rejects_unknown_user() {
+        assert!(!basic_auth_ok(&basic_header("bob:secret"), &basic_users()));
+    }
+
+    #[test]
+    fn basic_auth_rejects_missing_and_malformed() {
+        assert!(!basic_auth_ok(&HeaderMap::new(), &basic_users()));
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic !!notb64"),
+        );
+        assert!(!basic_auth_ok(&h, &basic_users()));
     }
 
     #[test]

@@ -154,6 +154,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) ip_access: IpAccess,
     /// Per-client-IP token-bucket rate limit, if configured.
     pub(crate) rate_limit: Option<RateLimit>,
+    /// HTTP Basic auth credentials (username -> password), if configured.
+    pub(crate) basic_auth: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Read-only view of a route for admin/introspection.
@@ -240,6 +242,10 @@ impl Router {
                         .map(IpAccess::compile)
                         .unwrap_or_default(),
                     rate_limit: r.rate_limit.as_ref().map(RateLimit::compile),
+                    basic_auth: r
+                        .basic_auth
+                        .as_ref()
+                        .map(|b| b.users.clone().into_iter().collect()),
                 }
             })
             .collect();
@@ -283,6 +289,7 @@ mod tests {
             headers: None,
             ip_access: None,
             rate_limit: None,
+            basic_auth: None,
         }
     }
 

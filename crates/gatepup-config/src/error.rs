@@ -94,6 +94,11 @@ pub enum ValidationError {
     #[error("compression algorithm {value:?} is not supported (expected: gzip, br)")]
     InvalidCompressionAlgorithm { value: String },
 
+    #[error(
+        "route {route:?} in listener {listener:?} has basicAuth with no (or empty) credentials"
+    )]
+    InvalidBasicAuth { listener: String, route: String },
+
     #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
     ZeroWeight { upstream: String, url: String },
 

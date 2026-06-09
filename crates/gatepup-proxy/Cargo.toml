@@ -24,6 +24,7 @@ ipnet.workspace = true
 async-compression.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
@@ -31,6 +32,7 @@ gatepup-observability.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
 flate2 = "1"
+base64.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http.workspace = true

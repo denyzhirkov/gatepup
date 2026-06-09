@@ -442,6 +442,7 @@ version = "1.2.0"
 dependencies = [
  "arc-swap",
  "async-compression",
+ "base64",
  "bytes",
  "flate2",
  "futures-util",

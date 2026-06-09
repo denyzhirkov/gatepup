@@ -152,6 +152,17 @@ fn check_listeners(
                     });
                 }
             }
+
+            if let Some(ba) = &route.basic_auth {
+                let bad = ba.users.is_empty()
+                    || ba.users.iter().any(|(u, p)| u.is_empty() || p.is_empty());
+                if bad {
+                    errors.push(ValidationError::InvalidBasicAuth {
+                        listener: listener.name.clone(),
+                        route: route.name.clone(),
+                    });
+                }
+            }
         }
     }
 }
@@ -454,6 +465,7 @@ mod tests {
             headers: None,
             ip_access: None,
             rate_limit: None,
+            basic_auth: None,
         }
     }
 
@@ -934,6 +946,18 @@ mod tests {
         });
         let errors = validate(&cfg).unwrap_err();
         assert!(errors.contains(&ValidationError::EmptyAdminToken));
+    }
+
+    #[test]
+    fn rejects_empty_basic_auth() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].basic_auth = Some(BasicAuthConfig {
+            users: Default::default(),
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidBasicAuth { .. })));
     }
 
     #[test]

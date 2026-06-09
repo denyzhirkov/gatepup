@@ -41,6 +41,7 @@ rcgen = "0.13"
 async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "brotli"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = { version = "0.3", default-features = false }
+base64 = "0.22"
 
 gatepup-config = { path = "crates/gatepup-config" }
 gatepup-core = { path = "crates/gatepup-core" }

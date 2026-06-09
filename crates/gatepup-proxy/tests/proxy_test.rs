@@ -271,6 +271,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 headers: None,
                 ip_access: None,
                 rate_limit: None,
+                basic_auth: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -335,6 +336,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
                 headers: None,
                 ip_access: None,
                 rate_limit: None,
+                basic_auth: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -1060,6 +1062,71 @@ async fn passthrough_small_body() {
         resp.headers().get("content-encoding").is_none(),
         "small body not compressed"
     );
+}
+
+fn config_basic_auth(proxy_port: u16, backend_port: u16) -> GatePupConfig {
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.listeners[0].routes[0].basic_auth = Some(gatepup_config::BasicAuthConfig {
+        users: [("alice".to_string(), "secret".to_string())]
+            .into_iter()
+            .collect(),
+    });
+    cfg
+}
+
+async fn get_basic(port: u16, creds: Option<&str>) -> Response<hyper::body::Incoming> {
+    let mut builder = Request::builder().uri(format!("http://127.0.0.1:{port}/"));
+    if let Some(creds) = creds {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(creds);
+        builder = builder.header("authorization", format!("Basic {b64}"));
+    }
+    let req = builder.body(Full::new(Bytes::new())).unwrap();
+    client().request(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn basic_auth_challenges_without_credentials() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    spawn_proxy(config_basic_auth(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get_basic(proxy_port, None).await;
+    assert_eq!(resp.status(), 401);
+    let www = resp
+        .headers()
+        .get("www-authenticate")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(www.starts_with("Basic"), "www-authenticate: {www}");
+}
+
+#[tokio::test]
+async fn basic_auth_rejects_wrong_credentials() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    spawn_proxy(config_basic_auth(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    assert_eq!(
+        get_basic(proxy_port, Some("alice:wrong")).await.status(),
+        401
+    );
+}
+
+#[tokio::test]
+async fn basic_auth_allows_valid_credentials() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    spawn_proxy(config_basic_auth(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get_basic(proxy_port, Some("alice:secret")).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"backend-ok");
 }
 
 #[tokio::test]

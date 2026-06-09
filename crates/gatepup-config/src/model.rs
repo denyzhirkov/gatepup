@@ -188,6 +188,18 @@ pub struct RouteConfig {
     /// Per-client-IP rate limit (token bucket) for this route.
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+    /// HTTP Basic auth guarding this route.
+    #[serde(default)]
+    pub basic_auth: Option<BasicAuthConfig>,
+}
+
+/// HTTP Basic auth for a route. `users` maps username to password. Credentials
+/// are matched in constant time and never logged. Store the config securely
+/// (plaintext passwords).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BasicAuthConfig {
+    pub users: std::collections::BTreeMap<String, String>,
 }
 
 /// Token-bucket rate limit applied per resolved client IP, per route. `burst` is

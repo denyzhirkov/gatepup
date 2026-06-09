@@ -320,6 +320,26 @@ A route can allow/deny clients by IP, evaluated against the **resolved client IP
   `deny`.
 - Applies to normal and WebSocket requests, after the route matches.
 
+## Basic auth
+
+Guard a route with HTTP Basic auth (distinct from admin auth, which protects the
+admin plane):
+
+```json
+{
+  "name": "internal",
+  "match": { "pathPrefix": "/internal" },
+  "upstream": "internal",
+  "basicAuth": { "users": { "alice": "s3cret", "bob": "hunter2" } }
+}
+```
+
+- Missing or wrong credentials → `401` with `WWW-Authenticate: Basic`.
+- Passwords are compared in constant time and never logged. `users` maps
+  username → password; store the config securely (passwords are plaintext).
+- Evaluated after IP allow/deny and rate limiting, so brute-force attempts are
+  still throttled. Applies to normal and WebSocket requests.
+
 ## Rate limiting
 
 A route can rate-limit each client with a **token bucket**, keyed per resolved
