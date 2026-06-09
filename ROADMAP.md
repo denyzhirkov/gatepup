@@ -64,6 +64,12 @@ These don't "complete" — they apply to every change. Keep them honored.
 - `jjmfcn` — Chunked-body overflow returns 502, not a precise 413 (only Content-Length gives exact 413). (kungfu mem_0014)
 - `qo06n7` — No deterministic test that a slow TLS handshake doesn't block other accepts. (kungfu mem_0013)
 
+## Differentiator ideas
+
+Candidate killer features (not committed scope) live in [`IDEAS.md`](./IDEAS.md):
+Docker label auto-discovery (`z88lpz`), live request tap (`8ekale`),
+`gatepup doctor` live preflight (`ajcsgq`).
+
 ## Where state lives (session continuity)
 
 1. `tsk` — machine task state (`tsk list`, `tsk list --inprogress`, `tsk show <id>`).
