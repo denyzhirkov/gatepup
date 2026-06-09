@@ -131,8 +131,55 @@ fn check_listeners(
                     upstream: route.upstream.clone(),
                 });
             }
+
+            if let Some(rules) = &route.headers {
+                check_header_ops(&listener.name, &route.name, &rules.request, errors);
+                check_header_ops(&listener.name, &route.name, &rules.response, errors);
+            }
         }
     }
+}
+
+fn check_header_ops(
+    listener: &str,
+    route: &str,
+    ops: &crate::model::HeaderOpsConfig,
+    errors: &mut Vec<ValidationError>,
+) {
+    for name in ops.remove.iter().chain(ops.set.keys()) {
+        if !is_valid_header_name(name) {
+            errors.push(ValidationError::InvalidHeaderName {
+                listener: listener.to_string(),
+                route: route.to_string(),
+                name: name.clone(),
+            });
+        }
+    }
+    for (name, value) in &ops.set {
+        if is_valid_header_name(name) && !is_valid_header_value(value) {
+            errors.push(ValidationError::InvalidHeaderValue {
+                listener: listener.to_string(),
+                route: route.to_string(),
+                name: name.clone(),
+            });
+        }
+    }
+}
+
+/// RFC 7230 token: non-empty, only `tchar` characters.
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// Header field value: visible ASCII plus space/tab, no control chars (blocks
+/// CR/LF header injection).
+fn is_valid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
 fn check_listener_tls(listener: &crate::model::ListenerConfig, errors: &mut Vec<ValidationError>) {
@@ -353,6 +400,7 @@ mod tests {
             },
             upstream: upstream.to_string(),
             strip_prefix: false,
+            headers: None,
         }
     }
 
@@ -737,6 +785,43 @@ mod tests {
         let out_net: std::net::IpAddr = "203.0.113.8".parse().unwrap();
         assert!(net.contains(&in_net));
         assert!(!net.contains(&out_net));
+    }
+
+    #[test]
+    fn rejects_invalid_header_name_and_value() {
+        let mut cfg = valid_config();
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("bad header".to_string(), "ok".to_string()); // space in name
+        set.insert("x-ok".to_string(), "bad\r\nvalue".to_string()); // CRLF injection
+        cfg.listeners[0].routes[0].headers = Some(HeaderRulesConfig {
+            request: HeaderOpsConfig {
+                set,
+                remove: vec![],
+            },
+            response: HeaderOpsConfig::default(),
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidHeaderName { .. })));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidHeaderValue { .. })));
+    }
+
+    #[test]
+    fn accepts_valid_header_rules() {
+        let mut cfg = valid_config();
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("X-Frame-Options".to_string(), "DENY".to_string());
+        cfg.listeners[0].routes[0].headers = Some(HeaderRulesConfig {
+            request: HeaderOpsConfig::default(),
+            response: HeaderOpsConfig {
+                set,
+                remove: vec!["Server".to_string()],
+            },
+        });
+        assert!(validate(&cfg).is_ok());
     }
 
     #[test]

@@ -113,6 +113,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
                 },
                 upstream: "default".to_string(),
                 strip_prefix: false,
+                headers: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {

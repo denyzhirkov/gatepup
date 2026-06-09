@@ -268,6 +268,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 },
                 upstream: "u".to_string(),
                 strip_prefix: false,
+                headers: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -327,6 +328,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
                 },
                 upstream: "u".to_string(),
                 strip_prefix: false,
+                headers: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -682,6 +684,48 @@ async fn slow_request_header_is_dropped_by_header_read_timeout() {
         n == 0 || buf.starts_with(b"HTTP/1.1 4"),
         "expected connection close or 4xx, read {n} bytes: {:?}",
         String::from_utf8_lossy(&buf[..n])
+    );
+}
+
+#[tokio::test]
+async fn applies_route_header_rules() {
+    use gatepup_config::{HeaderOpsConfig, HeaderRulesConfig};
+    use std::collections::BTreeMap;
+
+    let backend_port = spawn_header_echo_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.listeners[0].routes[0].headers = Some(HeaderRulesConfig {
+        request: HeaderOpsConfig {
+            set: BTreeMap::from([("x-custom".to_string(), "hi".to_string())]),
+            // Remove a header the proxy itself sets, proving route ops run after
+            // the standard X-Forwarded-* rewrite.
+            remove: vec!["x-forwarded-proto".to_string()],
+        },
+        response: HeaderOpsConfig {
+            set: BTreeMap::from([("x-frame-options".to_string(), "DENY".to_string())]),
+            remove: vec![],
+        },
+    });
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 200);
+    // response.set is applied to the client response.
+    assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let seen = String::from_utf8_lossy(&body).to_lowercase();
+    // request.set reached the upstream...
+    assert!(
+        seen.contains("x-custom: hi"),
+        "set header missing in {seen:?}"
+    );
+    // ...and request.remove deleted the proxy-set X-Forwarded-Proto.
+    assert!(
+        !seen.contains("x-forwarded-proto:"),
+        "remove failed in {seen:?}"
     );
 }
 

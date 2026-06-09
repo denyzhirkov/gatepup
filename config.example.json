@@ -24,7 +24,11 @@
             "pathPrefix": "/api"
           },
           "upstream": "api",
-          "stripPrefix": true
+          "stripPrefix": true,
+          "headers": {
+            "request": { "set": { "X-Proxied-By": "gatepup" }, "remove": [] },
+            "response": { "set": { "X-Frame-Options": "DENY" }, "remove": ["Server"] }
+          }
         }
       ]
     }

@@ -141,4 +141,18 @@ pub enum ValidationError {
         listener: String,
         field: &'static str,
     },
+
+    #[error("route {route:?} in listener {listener:?} has an invalid header name {name:?}")]
+    InvalidHeaderName {
+        listener: String,
+        route: String,
+        name: String,
+    },
+
+    #[error("route {route:?} in listener {listener:?} has an invalid value for header {name:?}")]
+    InvalidHeaderValue {
+        listener: String,
+        route: String,
+        name: String,
+    },
 }

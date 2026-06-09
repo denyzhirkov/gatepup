@@ -135,6 +135,31 @@ pub struct RouteConfig {
     /// Strip the matched `pathPrefix` from the path before forwarding.
     #[serde(default)]
     pub strip_prefix: bool,
+    /// Header rewrites applied to the upstream request and the client response.
+    #[serde(default)]
+    pub headers: Option<HeaderRulesConfig>,
+}
+
+/// Per-route header rewrites: applied to the request before forwarding upstream
+/// and to the response before returning to the client.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderRulesConfig {
+    #[serde(default)]
+    pub request: HeaderOpsConfig,
+    #[serde(default)]
+    pub response: HeaderOpsConfig,
+}
+
+/// `set` overwrites (or inserts) a header; `remove` deletes it. `set` is applied
+/// after `remove`. Names/values are validated as valid HTTP header tokens.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeaderOpsConfig {
+    #[serde(default)]
+    pub set: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

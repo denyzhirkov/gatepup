@@ -267,6 +267,8 @@ async fn forward(
     }
     let upstream_pq = route.rewritten_path_and_query(&parts.uri);
     rewrite_headers(&mut parts.headers, host, scheme, remote.ip(), request_id);
+    // Route-configured request header rewrites win over the standard ones above.
+    route.request_headers.apply(&mut parts.headers);
 
     // The body is buffered for replay only when retries are enabled for an
     // eligible method and the body fits the cap; otherwise it streams once.
@@ -323,8 +325,10 @@ async fn forward(
                 target.state.observe(status < 500);
                 let retry_5xx = status >= 500 && policy.is_some_and(|p| p.on_5xx);
                 if status < 500 || is_last || !retry_5xx {
+                    let mut response = resp.map(box_incoming);
+                    route.response_headers.apply(response.headers_mut());
                     return Ok(Forwarded {
-                        response: resp.map(box_incoming),
+                        response,
                         route: route_name,
                         upstream: upstream_name,
                     });

@@ -189,6 +189,33 @@ forwarding — handy for mounting a service under a sub-path:
   `/docs`. Use a trailing slash in `pathPrefix` if you want a boundary.
 - Default is `false` — the path is forwarded unchanged.
 
+## Header manipulation
+
+A route can rewrite headers on the **request** (before forwarding upstream) and
+on the **response** (before returning to the client) — e.g. inject security
+headers, strip `Server`, or add a marker:
+
+```json
+{
+  "name": "api",
+  "match": { "pathPrefix": "/api" },
+  "upstream": "api",
+  "headers": {
+    "request":  { "set": { "X-Proxied-By": "gatepup" }, "remove": ["X-Debug"] },
+    "response": { "set": { "X-Frame-Options": "DENY" }, "remove": ["Server"] }
+  }
+}
+```
+
+- `set` inserts or overwrites a header; `remove` deletes it. For each direction
+  `remove` runs first, then `set`, so an explicit `set` always wins.
+- Request rules apply **after** GatePup's own `X-Forwarded-*` rewrite, so you can
+  override or strip those too.
+- Names and values are validated (a bad name or a CR/LF-injecting value is a
+  config error).
+- Header rules apply to normal proxied HTTP requests; WebSocket upgrade requests
+  are forwarded with their handshake headers intact.
+
 ## Limits (DoS hardening)
 
 The optional `limits` block bounds what a single client can consume. Unlike

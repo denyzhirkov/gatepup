@@ -1,5 +1,44 @@
-use gatepup_config::RouteConfig;
-use http::Uri;
+use gatepup_config::{HeaderOpsConfig, RouteConfig};
+use http::{HeaderMap, HeaderName, HeaderValue, Uri};
+
+/// Compiled header rewrite for one direction: `remove` runs, then `set` (so an
+/// explicit `set` always wins). Built from already-validated config; any
+/// name/value that fails to compile is dropped defensively.
+#[derive(Default)]
+pub(crate) struct HeaderOps {
+    set: Vec<(HeaderName, HeaderValue)>,
+    remove: Vec<HeaderName>,
+}
+
+impl HeaderOps {
+    fn compile(cfg: &HeaderOpsConfig) -> Self {
+        let remove = cfg
+            .remove
+            .iter()
+            .filter_map(|n| HeaderName::try_from(n.as_str()).ok())
+            .collect();
+        let set = cfg
+            .set
+            .iter()
+            .filter_map(|(n, v)| {
+                Some((
+                    HeaderName::try_from(n.as_str()).ok()?,
+                    HeaderValue::try_from(v.as_str()).ok()?,
+                ))
+            })
+            .collect();
+        Self { set, remove }
+    }
+
+    pub(crate) fn apply(&self, headers: &mut HeaderMap) {
+        for name in &self.remove {
+            headers.remove(name);
+        }
+        for (name, value) in &self.set {
+            headers.insert(name, value.clone());
+        }
+    }
+}
 
 /// How a route matches the request host.
 enum HostMatch {
@@ -51,6 +90,9 @@ pub(crate) struct CompiledRoute {
     /// Path prefix; defaults to `/` (matches every path).
     path_prefix: String,
     strip_prefix: bool,
+    /// Header rewrites for the upstream request and the client response.
+    pub(crate) request_headers: HeaderOps,
+    pub(crate) response_headers: HeaderOps,
 }
 
 /// Read-only view of a route for admin/introspection.
@@ -121,6 +163,16 @@ impl Router {
                         .filter(|p| !p.is_empty())
                         .unwrap_or_else(|| "/".to_string()),
                     strip_prefix: r.strip_prefix,
+                    request_headers: r
+                        .headers
+                        .as_ref()
+                        .map(|h| HeaderOps::compile(&h.request))
+                        .unwrap_or_default(),
+                    response_headers: r
+                        .headers
+                        .as_ref()
+                        .map(|h| HeaderOps::compile(&h.response))
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -161,7 +213,37 @@ mod tests {
             },
             upstream: name_upstream.to_string(),
             strip_prefix: false,
+            headers: None,
         }
+    }
+
+    #[test]
+    fn header_ops_remove_then_set() {
+        use std::collections::BTreeMap;
+        let cfg = HeaderOpsConfig {
+            set: BTreeMap::from([("x-a".to_string(), "new".to_string())]),
+            remove: vec!["x-b".to_string()],
+        };
+        let ops = HeaderOps::compile(&cfg);
+        let mut h = HeaderMap::new();
+        h.insert("x-b", HeaderValue::from_static("old"));
+        h.insert("x-a", HeaderValue::from_static("orig"));
+        ops.apply(&mut h);
+        assert!(!h.contains_key("x-b"), "remove should delete x-b");
+        assert_eq!(h.get("x-a").unwrap(), "new", "set should overwrite x-a");
+    }
+
+    #[test]
+    fn header_ops_compile_skips_invalid() {
+        use std::collections::BTreeMap;
+        let cfg = HeaderOpsConfig {
+            set: BTreeMap::from([("bad name".to_string(), "v".to_string())]),
+            remove: vec!["also bad".to_string()],
+        };
+        let ops = HeaderOps::compile(&cfg);
+        let mut h = HeaderMap::new();
+        ops.apply(&mut h); // must not panic; invalid entries are dropped
+        assert!(h.is_empty());
     }
 
     #[test]
