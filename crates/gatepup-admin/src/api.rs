@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::CONTENT_TYPE;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -22,6 +22,14 @@ pub(crate) fn route(state: &AdminState, req: Request<Incoming>) -> Response<Full
 
     let path = req.uri().path();
 
+    // Bearer auth (when configured) guards everything except /health, which the
+    // container HEALTHCHECK and liveness probes must reach unauthenticated.
+    if let Some(token) = state.token.as_deref() {
+        if path != "/health" && !authorized(&req, token) {
+            return unauthorized();
+        }
+    }
+
     if Some(path) == state.metrics_path.as_deref() {
         return metrics(state);
     }
@@ -43,6 +51,39 @@ pub(crate) fn route(state: &AdminState, req: Request<Incoming>) -> Response<Full
         ),
         _ => json(StatusCode::NOT_FOUND, &json!({ "error": "not_found" })),
     }
+}
+
+/// True when the request carries `Authorization: Bearer <token>` matching the
+/// configured token (compared in constant time to avoid leaking it via timing).
+fn authorized(req: &Request<Incoming>, token: &str) -> bool {
+    let expected = format!("Bearer {token}");
+    req.headers()
+        .get(AUTHORIZATION)
+        .map(|v| constant_time_eq(v.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn unauthorized() -> Response<Full<Bytes>> {
+    let mut resp = json(
+        StatusCode::UNAUTHORIZED,
+        &json!({ "error": "unauthorized" }),
+    );
+    resp.headers_mut().insert(
+        WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"gatepup-admin\""),
+    );
+    resp
 }
 
 fn metrics(state: &AdminState) -> Response<Full<Bytes>> {

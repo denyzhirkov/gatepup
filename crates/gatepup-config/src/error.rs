@@ -59,6 +59,9 @@ pub enum ValidationError {
     #[error("admin has invalid bind address {bind:?}")]
     InvalidAdminBind { bind: String },
 
+    #[error("admin token must not be empty when set")]
+    EmptyAdminToken,
+
     #[error("upstream {upstream:?} has invalid target url {url:?}")]
     InvalidTargetUrl { upstream: String, url: String },
 

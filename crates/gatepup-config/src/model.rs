@@ -293,6 +293,11 @@ pub struct HealthCheckConfig {
 pub struct AdminConfig {
     pub enabled: bool,
     pub bind: String,
+    /// Optional bearer token. When set, admin endpoints (except `/health`)
+    /// require `Authorization: Bearer <token>`. Required to expose admin beyond
+    /// localhost.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

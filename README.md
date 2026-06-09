@@ -93,6 +93,21 @@ curl 127.0.0.1:8080/config/effective   # the validated effective config
 curl 127.0.0.1:8080/metrics            # Prometheus metrics (when metrics.enabled)
 ```
 
+**Authentication.** Set `admin.token` (or `GATEPUP_ADMIN_TOKEN`) to require a
+bearer token on every endpoint **except `/health`** (which stays open for
+container/liveness probes):
+
+```json
+"admin": { "enabled": true, "bind": "0.0.0.0:8080", "token": "a-long-random-secret" }
+```
+
+```bash
+curl -H "Authorization: Bearer a-long-random-secret" 127.0.0.1:8080/routes
+```
+
+Missing/wrong token → `401`. The token is compared in constant time. Set one
+before exposing admin beyond `127.0.0.1`.
+
 ## WebSocket
 
 WebSocket (and other HTTP `Upgrade`) requests are proxied automatically — no
@@ -395,6 +410,7 @@ gatepup run
 | `GATEPUP_HEALTHCHECK_PATH` | simple mode: enable active health checks |
 | `GATEPUP_LOG` | override `app.logLevel` |
 | `GATEPUP_ADMIN` | enable admin on this bind |
+| `GATEPUP_ADMIN_TOKEN` | bearer token required on admin endpoints (except `/health`) |
 | `GATEPUP_METRICS_PATH` | enable metrics at this path |
 | `GATEPUP_TIMEOUT_CONNECT_MS` / `GATEPUP_TIMEOUT_REQUEST_MS` | override timeouts |
 

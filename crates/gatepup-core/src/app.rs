@@ -79,6 +79,7 @@ pub async fn serve(config: GatePupConfig, cli_path: Option<PathBuf>) -> Result<(
                 metrics_path,
                 effective_config: effective.clone(),
                 version: env!("CARGO_PKG_VERSION"),
+                token: admin.token.clone(),
             }))
         }
         _ => None,

@@ -339,6 +339,9 @@ fn check_admin(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
                 bind: admin.bind.clone(),
             });
         }
+        if admin.token.as_deref().is_some_and(str::is_empty) {
+            errors.push(ValidationError::EmptyAdminToken);
+        }
     }
 }
 
@@ -905,6 +908,18 @@ mod tests {
             burst: 0, // 0 = derive capacity from rate
         });
         assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_admin_token() {
+        let mut cfg = valid_config();
+        cfg.admin = Some(AdminConfig {
+            enabled: true,
+            bind: "127.0.0.1:8080".to_string(),
+            token: Some(String::new()),
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::EmptyAdminToken));
     }
 
     #[test]

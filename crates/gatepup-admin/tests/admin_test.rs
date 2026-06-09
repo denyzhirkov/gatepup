@@ -75,6 +75,10 @@ fn sample_config() -> GatePupConfig {
 }
 
 async fn spawn_admin() -> u16 {
+    spawn_admin_with_token(None).await
+}
+
+async fn spawn_admin_with_token(token: Option<&str>) -> u16 {
     let config = sample_config();
     let snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(
         gatepup_proxy::build_snapshot(&config).unwrap(),
@@ -93,6 +97,7 @@ async fn spawn_admin() -> u16 {
         metrics_path: Some("/metrics".to_string()),
         effective_config,
         version: "0.1.0-test",
+        token: token.map(str::to_string),
     });
 
     let (_tx, rx) = watch::channel(false);
@@ -199,4 +204,48 @@ async fn non_get_is_405() {
     let resp = request(port, Method::POST, "/health").await;
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert!(body_string(resp).await.contains("method_not_allowed"));
+}
+
+async fn request_bearer(
+    port: u16,
+    path: &str,
+    bearer: Option<&str>,
+) -> Response<hyper::body::Incoming> {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(format!("http://127.0.0.1:{port}{path}"));
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let req = builder.body(Full::new(Bytes::new())).unwrap();
+    client().request(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn auth_rejects_missing_and_wrong_token() {
+    let port = spawn_admin_with_token(Some("s3cret")).await;
+    // No header -> 401 + WWW-Authenticate.
+    let resp = request_bearer(port, "/routes", None).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(resp.headers().contains_key(http::header::WWW_AUTHENTICATE));
+    assert!(body_string(resp).await.contains("unauthorized"));
+    // Wrong token -> 401.
+    let resp = request_bearer(port, "/routes", Some("nope")).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_accepts_correct_token() {
+    let port = spawn_admin_with_token(Some("s3cret")).await;
+    let resp = request_bearer(port, "/routes", Some("s3cret")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("\"api\""));
+}
+
+#[tokio::test]
+async fn health_is_open_even_with_token() {
+    // The container HEALTHCHECK must reach /health without credentials.
+    let port = spawn_admin_with_token(Some("s3cret")).await;
+    let resp = request_bearer(port, "/health", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }

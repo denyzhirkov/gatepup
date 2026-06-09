@@ -46,6 +46,9 @@ pub struct AdminState {
     /// Pre-rendered effective config JSON for `/config/effective` (swapped on reload).
     pub effective_config: Arc<ArcSwap<String>>,
     pub version: &'static str,
+    /// Optional bearer token; when set, all endpoints except `/health` require
+    /// `Authorization: Bearer <token>`.
+    pub token: Option<String>,
 }
 
 /// Max time to drain in-flight admin connections after shutdown.

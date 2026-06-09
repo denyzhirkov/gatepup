@@ -146,6 +146,7 @@ fn apply_overrides(
         config.admin = Some(AdminConfig {
             enabled: true,
             bind,
+            token: get("GATEPUP_ADMIN_TOKEN"),
         });
     }
     if let Some(path) = get("GATEPUP_METRICS_PATH") {
