@@ -723,6 +723,48 @@ async fn rejects_oversize_body_with_413() {
     );
 }
 
+/// A request body with no known length, sent in one frame — hyper transmits it
+/// chunked (no Content-Length), so the proxy can't pre-check it and must enforce
+/// the cap mid-stream.
+struct OneShotBody(Option<Bytes>);
+
+impl hyper::body::Body for OneShotBody {
+    type Data = Bytes;
+    type Error = Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Infallible>>> {
+        std::task::Poll::Ready(self.0.take().map(|b| Ok(hyper::body::Frame::data(b))))
+    }
+}
+
+#[tokio::test]
+async fn chunked_oversize_body_returns_413() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.limits.max_body_bytes = 10;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    // No Content-Length (chunked) + body over the cap -> cut mid-stream -> 413.
+    let client: Client<HttpConnector, OneShotBody> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://127.0.0.1:{proxy_port}/"))
+        .body(OneShotBody(Some(Bytes::from(vec![b'x'; 100]))))
+        .unwrap();
+    let resp = client.request(req).await.unwrap();
+    assert_eq!(resp.status(), 413);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("payload_too_large"),
+        "body was: {body:?}"
+    );
+}
+
 #[tokio::test]
 async fn forwards_body_within_limit() {
     let backend_port = spawn_backend().await;

@@ -252,8 +252,8 @@ slow or oversized *inbound* requests:
 
 - **`maxBodyBytes`** — reject a request body larger than this with `413
   payload_too_large`. A declared `Content-Length` over the cap is rejected up
-  front; an undeclared (chunked) body is cut mid-stream once it exceeds the cap.
-  `0` (default) means unlimited.
+  front; an undeclared (chunked) body is cut off and also rejected with `413`
+  once it exceeds the cap mid-stream. `0` (default) means unlimited.
 - **`headerReadTimeoutMs`** — max time to receive the full request header from a
   client (slowloris guard). A client that stalls mid-header has its connection
   dropped. Default `15000`; `0` disables it.

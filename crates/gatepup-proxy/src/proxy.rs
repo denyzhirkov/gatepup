@@ -1,5 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -107,26 +107,83 @@ impl BodySource {
     }
 }
 
+/// Request body wrapper that fails once more than `limit` bytes have been read,
+/// flagging `exceeded`. Used for streamed (chunked / undeclared-length) bodies
+/// where `Content-Length` can't be pre-checked: the caller maps a send failure
+/// to 413 when `exceeded` is set (rather than a generic 502).
+struct CappedBody<B> {
+    inner: B,
+    limit: u64,
+    seen: u64,
+    exceeded: Arc<AtomicBool>,
+}
+
+impl<B> hyper::body::Body for CappedBody<B>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.seen += data.len() as u64;
+                    if this.seen > this.limit {
+                        this.exceeded.store(true, Ordering::Relaxed);
+                        return Poll::Ready(Some(Err("request body exceeds maxBodyBytes".into())));
+                    }
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e.into()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// Decide whether the request body can be buffered for replay, and produce the
-/// matching [`BodySource`]. Buffering is bounded by [`BODY_BUFFER_CAP`]; bodies
-/// that exceed it (or fail to read) fall back to a single streamed attempt. A
-/// non-zero `max_body_bytes` wraps the streamed body so it is cut if it exceeds
-/// the cap mid-stream (declared-oversize bodies are rejected earlier with 413).
-async fn prepare_body_source(body: Incoming, replayable: bool, max_body_bytes: u64) -> BodySource {
+/// matching [`BodySource`] plus an overflow flag. Buffering is bounded by
+/// [`BODY_BUFFER_CAP`]; bodies that exceed it (or fail to read) fall back to a
+/// single streamed attempt. A non-zero `max_body_bytes` wraps the streamed body
+/// in a [`CappedBody`] that cuts it mid-stream; the returned flag is set on
+/// overflow so the caller can return 413 (declared-oversize bodies are rejected
+/// up front by the `Content-Length` check instead).
+async fn prepare_body_source(
+    body: Incoming,
+    replayable: bool,
+    max_body_bytes: u64,
+) -> (BodySource, Arc<AtomicBool>) {
+    let exceeded = Arc::new(AtomicBool::new(false));
     if replayable {
-        return match Limited::new(body, BODY_BUFFER_CAP).collect().await {
+        let source = match Limited::new(body, BODY_BUFFER_CAP).collect().await {
             Ok(collected) => BodySource::Buffered(collected.to_bytes()),
             // Over the cap or a read error: can't safely replay, and the original
             // body is now consumed — surface as a single (already-consumed) attempt.
             Err(_) => BodySource::Once(None),
         };
+        return (source, exceeded);
     }
     let boxed = if max_body_bytes > 0 {
-        Limited::new(body, max_body_bytes as usize).boxed()
+        CappedBody {
+            inner: body,
+            limit: max_body_bytes,
+            seen: 0,
+            exceeded: exceeded.clone(),
+        }
+        .boxed()
     } else {
         box_incoming(body)
     };
-    BodySource::Once(Some(boxed))
+    (BodySource::Once(Some(boxed)), exceeded)
 }
 
 /// Per-request failure that maps to a specific HTTP status + JSON error body.
@@ -331,7 +388,8 @@ async fn forward(
         }
         _ => false,
     };
-    let mut body_source = prepare_body_source(body, replayable, snapshot.max_body_bytes).await;
+    let (mut body_source, body_overflow) =
+        prepare_body_source(body, replayable, snapshot.max_body_bytes).await;
 
     // Retries only when the body is replayable; otherwise a single attempt.
     let policy = upstream.retry.as_ref();
@@ -371,6 +429,11 @@ async fn forward(
                 return Err(GatewayError::UpstreamTimeout);
             }
             Ok(Err(_)) => {
+                // A send failure caused by the body cap is a client error (413),
+                // not an upstream connect failure — and is never retried.
+                if body_overflow.load(Ordering::Relaxed) {
+                    return Err(GatewayError::PayloadTooLarge);
+                }
                 target.state.observe(false);
                 last_err = GatewayError::UpstreamConnect;
                 let retry = policy.is_some_and(|p| p.on_connect_failure);
@@ -791,8 +854,35 @@ mod tests {
     #[test]
     fn undeclared_body_passes_content_length_check() {
         // No Content-Length (e.g. chunked) is not rejected up front; it is bounded
-        // mid-stream by the BodySource wrapper instead.
+        // mid-stream by the CappedBody wrapper instead.
         assert!(!body_exceeds_limit(&HeaderMap::new(), 10));
+    }
+
+    #[tokio::test]
+    async fn capped_body_errors_and_flags_on_overflow() {
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let body = CappedBody {
+            inner: Full::new(Bytes::from(vec![b'x'; 100])),
+            limit: 10,
+            seen: 0,
+            exceeded: exceeded.clone(),
+        };
+        assert!(body.collect().await.is_err());
+        assert!(exceeded.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn capped_body_passes_under_limit() {
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let body = CappedBody {
+            inner: Full::new(Bytes::from(vec![b'x'; 5])),
+            limit: 10,
+            seen: 0,
+            exceeded: exceeded.clone(),
+        };
+        let collected = body.collect().await.unwrap();
+        assert_eq!(collected.to_bytes().len(), 5);
+        assert!(!exceeded.load(Ordering::Relaxed));
     }
 
     fn nets(cidrs: &[&str]) -> Vec<IpNet> {
