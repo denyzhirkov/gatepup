@@ -6,25 +6,43 @@ This file is the human-readable map. Guiding philosophy: **do less, but do it
 extremely well** — don't grow scope beyond the master prompt without an explicit
 decision.
 
-Status as of v1.0.0 released. MVP (v0.1) + Reliability (v0.2: retries, TLS,
-WebSocket, hot reload, wildcard host) + Edge config (v0.3: env config, Alpine
-image) + DoS hardening (body size + client timeouts) are **done**.
+Status: **v1.1.0 released** (Docker Hub `denyzhirkov/gatepup`). Done: MVP (v0.1) +
+Reliability (v0.2: retries, TLS, WebSocket, hot reload, wildcard host) + Edge
+config (v0.3: env config, Alpine image) + v1.1 (path rewrite + DoS hardening:
+body size + client header timeouts).
 
-## A. Roadmap features
+## A. Roadmap features — milestone plan
 
-### Tracked in `tsk` (pending)
-- `5m1881` — Header manipulation (request/response)
-- `tja7bh` — Rate limiting
-- `ubmeqp` — Admin API authentication
-- `epk1t4` — Auto-TLS (ACME / Let's Encrypt)
-- `um7vor` — Load-balancing strategies (least_connections / random / ip_hash; keep lock-free)
-- `g9zer2` — IP allow/deny list (CIDR)
-- `nbcfic` — Basic auth on routes
-- `3znddq` — Response compression (gzip/br)
-- `8mockr` — HTTP/2 support (downstream + optional upstream)
-- `2ngyq1` — Admin UI dashboard
-- `4gbgcc` — Admin config diff + safe-reload preview
-- `uaa1p7` — v0.5+ backlog umbrella: canary, blue/green, sticky sessions, WASM hooks, k8s ingress, static files
+Complexity S/M/L/XL · priority P0 (blocks completeness) / P1 (baseline) / P2 (polish).
+Ordering rationale: dependency-correctness (real-IP before rate-limit/ACL),
+cheap-and-valuable first, isolate big/risky epics (ACME, HTTP/2).
+
+**Quick win (parallel, now)**
+- `5zyeu3` — Multi-arch Docker image amd64+arm64 — S, P0. CI only; widens adoption. NEW.
+
+**v1.2 — Safe at the edge**
+- `rncdxs` — Trusted-proxy / real client IP — S–M, P0 (prereq for rate-limit & IP-ACL). NEW.
+- `5m1881` — Header manipulation (request/response) — M, P0. Security headers / CORS.
+- `g9zer2` — IP allow/deny (CIDR) — S–M, P0. Needs `rncdxs`.
+- `tja7bh` — Rate limiting — L, P0. Needs `rncdxs`.
+- fold in: `jjmfcn` (chunked→413, S), `olvvf5` (idle timeout, M).
+
+**v1.3 — HTTPS everywhere**
+- `f3kite` — TLS to upstream (HTTPS backends) — M, P0. Plain HttpConnector today. NEW.
+- `epk1t4` — Auto-TLS (ACME / Let's Encrypt) — XL, P0. Flagship; own focused epic.
+
+**v1.4 — Modern + manageable**
+- `ubmeqp` — Admin API authentication — S–M, P1. Prereq for UI / remote.
+- `8mockr` — HTTP/2 (downstream + optional upstream) — L, P1. Touches core server.
+- `3znddq` — Response compression (gzip/br) — M, P1.
+- `nbcfic` — Basic auth on routes — S–M, P1.
+
+**v1.5 / later — Ops polish**
+- `um7vor` — LB strategies (least_connections / random / ip_hash; lock-free) — M, P2.
+- `2ngyq1` — Admin UI dashboard — M, P2. Needs `ubmeqp`.
+- `4gbgcc` — Admin config diff + safe-reload preview — M, P2.
+- `qo06n7` — Deterministic slow-handshake-doesn't-block-accepts test — S, P2.
+- `uaa1p7` — v0.5+ umbrella: canary, blue/green, sticky, WASM, k8s, static — XL, P2.
 
 ## B. Standing cross-cutting topics (disciplines & invariants)
 
