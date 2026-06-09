@@ -10,6 +10,7 @@
 mod error;
 mod health;
 mod proxy;
+mod rate_limit;
 mod router;
 mod server;
 mod snapshot;

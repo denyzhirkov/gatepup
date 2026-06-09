@@ -285,6 +285,29 @@ A route can allow/deny clients by IP, evaluated against the **resolved client IP
   `deny`.
 - Applies to normal and WebSocket requests, after the route matches.
 
+## Rate limiting
+
+A route can rate-limit each client with a **token bucket**, keyed per resolved
+client IP:
+
+```json
+{
+  "name": "api",
+  "match": { "pathPrefix": "/api" },
+  "upstream": "api",
+  "rateLimit": { "requestsPerSecond": 20, "burst": 40 }
+}
+```
+
+- `requestsPerSecond` is the sustained refill rate (fractional allowed, e.g.
+  `0.1` ≈ 6/min); `burst` is the bucket capacity (max instantaneous requests).
+- `burst` `0` (default) means `ceil(requestsPerSecond)` (at least 1).
+- Over the limit → `429` with `{"error":"rate_limited"}` and a `Retry-After`
+  header.
+- Keyed per **resolved client IP** per route (respects `trustedProxies`). State
+  is in-memory, sharded for low contention, and survives config reloads; idle
+  buckets are evicted automatically, so memory stays bounded under an IP flood.
+
 ## Docker
 
 Pull the published image from [Docker Hub](https://hub.docker.com/r/denyzhirkov/gatepup)

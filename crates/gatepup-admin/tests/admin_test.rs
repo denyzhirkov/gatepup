@@ -45,6 +45,7 @@ fn sample_config() -> GatePupConfig {
                 strip_prefix: false,
                 headers: None,
                 ip_access: None,
+                rate_limit: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {

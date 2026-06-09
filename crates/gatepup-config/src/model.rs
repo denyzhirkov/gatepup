@@ -141,6 +141,20 @@ pub struct RouteConfig {
     /// Client IP allow/deny filtering (CIDRs), evaluated on the resolved client IP.
     #[serde(default)]
     pub ip_access: Option<IpAccessConfig>,
+    /// Per-client-IP rate limit (token bucket) for this route.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+/// Token-bucket rate limit applied per resolved client IP, per route. `burst` is
+/// the bucket capacity (max instantaneous requests); `0` defaults to
+/// `ceil(requestsPerSecond)` (min 1). Exceeding it yields 429.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RateLimitConfig {
+    pub requests_per_second: f64,
+    #[serde(default)]
+    pub burst: u32,
 }
 
 /// Client IP access control for a route. `deny` always blocks (takes precedence);

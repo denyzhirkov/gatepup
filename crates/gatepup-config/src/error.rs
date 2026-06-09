@@ -163,4 +163,11 @@ pub enum ValidationError {
         field: &'static str,
         value: String,
     },
+
+    #[error("route {route:?} in listener {listener:?} has rateLimit requestsPerSecond {value} (must be a finite number > 0)")]
+    InvalidRateLimit {
+        listener: String,
+        route: String,
+        value: String,
+    },
 }

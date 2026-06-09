@@ -141,6 +141,16 @@ fn check_listeners(
                 check_ip_acl(&listener.name, &route.name, "allow", &acl.allow, errors);
                 check_ip_acl(&listener.name, &route.name, "deny", &acl.deny, errors);
             }
+
+            if let Some(rl) = &route.rate_limit {
+                if !rl.requests_per_second.is_finite() || rl.requests_per_second <= 0.0 {
+                    errors.push(ValidationError::InvalidRateLimit {
+                        listener: listener.name.clone(),
+                        route: route.name.clone(),
+                        value: rl.requests_per_second.to_string(),
+                    });
+                }
+            }
         }
     }
 }
@@ -426,6 +436,7 @@ mod tests {
             strip_prefix: false,
             headers: None,
             ip_access: None,
+            rate_limit: None,
         }
     }
 
@@ -868,6 +879,29 @@ mod tests {
         cfg.listeners[0].routes[0].ip_access = Some(IpAccessConfig {
             allow: vec!["10.0.0.0/8".into(), "192.168.1.1".into()],
             deny: vec!["10.0.0.5".into(), "fd00::/8".into()],
+        });
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_nonpositive_rate_limit() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].rate_limit = Some(RateLimitConfig {
+            requests_per_second: 0.0,
+            burst: 5,
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidRateLimit { .. })));
+    }
+
+    #[test]
+    fn accepts_valid_rate_limit() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].rate_limit = Some(RateLimitConfig {
+            requests_per_second: 10.0,
+            burst: 0, // 0 = derive capacity from rate
         });
         assert!(validate(&cfg).is_ok());
     }

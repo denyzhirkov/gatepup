@@ -19,6 +19,7 @@ use tokio::net::TcpStream;
 
 use gatepup_observability::Metrics;
 
+use crate::rate_limit::RateLimiter;
 use crate::snapshot::RuntimeConfig;
 use crate::{BoxError, SharedConfig};
 
@@ -103,6 +104,7 @@ async fn prepare_body_source(body: Incoming, replayable: bool, max_body_bytes: u
 enum GatewayError {
     RouteNotFound,
     Forbidden,
+    TooManyRequests,
     PayloadTooLarge,
     UpstreamMissing,
     NoHealthyUpstream,
@@ -116,6 +118,7 @@ impl GatewayError {
         match self {
             GatewayError::RouteNotFound => (StatusCode::NOT_FOUND, "route_not_found"),
             GatewayError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            GatewayError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             GatewayError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             GatewayError::NoHealthyUpstream => {
                 (StatusCode::SERVICE_UNAVAILABLE, "no_healthy_upstream")
@@ -133,7 +136,10 @@ impl GatewayError {
     fn is_client_error(self) -> bool {
         matches!(
             self,
-            GatewayError::RouteNotFound | GatewayError::Forbidden | GatewayError::PayloadTooLarge
+            GatewayError::RouteNotFound
+                | GatewayError::Forbidden
+                | GatewayError::TooManyRequests
+                | GatewayError::PayloadTooLarge
         )
     }
 }
@@ -156,6 +162,7 @@ pub(crate) async fn handle(
     shared: SharedConfig,
     client: ProxyClient,
     metrics: Arc<Metrics>,
+    rate_limiter: Arc<RateLimiter>,
     remote: SocketAddr,
 ) -> Response<ResponseBody> {
     let started = Instant::now();
@@ -185,6 +192,7 @@ pub(crate) async fn handle(
             client_ip,
             &request_id,
             &metrics,
+            &rate_limiter,
         )
         .await
     } else {
@@ -199,6 +207,7 @@ pub(crate) async fn handle(
             remote,
             client_ip,
             &request_id,
+            &rate_limiter,
         )
         .await
     };
@@ -245,6 +254,7 @@ async fn forward(
     remote: SocketAddr,
     client_ip: IpAddr,
     request_id: &str,
+    rate_limiter: &RateLimiter,
 ) -> Result<Forwarded, GatewayError> {
     // The listener's router comes from the current snapshot (it may have been
     // hot-swapped since this connection was accepted).
@@ -259,6 +269,11 @@ async fn forward(
         .ok_or(GatewayError::RouteNotFound)?;
     if !route.ip_access.allows(client_ip) {
         return Err(GatewayError::Forbidden);
+    }
+    if let Some(rl) = &route.rate_limit {
+        if !rate_limiter.check(&route.name, client_ip, rl.rate, rl.capacity, Instant::now()) {
+            return Err(GatewayError::TooManyRequests);
+        }
     }
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
@@ -389,6 +404,7 @@ async fn handle_upgrade(
     client_ip: IpAddr,
     request_id: &str,
     metrics: &Metrics,
+    rate_limiter: &RateLimiter,
 ) -> Result<Forwarded, GatewayError> {
     let router = snapshot
         .listeners
@@ -401,6 +417,11 @@ async fn handle_upgrade(
         .ok_or(GatewayError::RouteNotFound)?;
     if !route.ip_access.allows(client_ip) {
         return Err(GatewayError::Forbidden);
+    }
+    if let Some(rl) = &route.rate_limit {
+        if !rate_limiter.check(&route.name, client_ip, rl.rate, rl.capacity, Instant::now()) {
+            return Err(GatewayError::TooManyRequests);
+        }
     }
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
@@ -665,6 +686,10 @@ fn error_response(err: GatewayError, request_id: &str) -> Response<ResponseBody>
     if let Ok(value) = HeaderValue::from_str(request_id) {
         resp.headers_mut()
             .insert(HeaderName::from_static("x-request-id"), value);
+    }
+    if matches!(err, GatewayError::TooManyRequests) {
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
     resp
 }

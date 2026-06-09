@@ -30,6 +30,7 @@ struct ConnLimits {
 use crate::error::ProxyError;
 use crate::health::run_health_supervisor;
 use crate::proxy::{build_client, handle, ProxyClient};
+use crate::rate_limit::RateLimiter;
 use crate::snapshot::RuntimeConfig;
 use crate::SharedConfig;
 
@@ -70,6 +71,9 @@ pub async fn serve_shared(
         header_read_timeout: snapshot.header_read_timeout,
         max_header_bytes: snapshot.max_header_bytes,
     };
+    // Rate-limit state is shared across listeners and survives reloads (the
+    // per-route params come from the snapshot per request; the buckets persist).
+    let rate_limiter = Arc::new(RateLimiter::new());
 
     let mut handles = Vec::with_capacity(snapshot.listeners.len());
     for listener in &snapshot.listeners {
@@ -91,6 +95,7 @@ pub async fn serve_shared(
             metrics.clone(),
             shutdown.clone(),
             conn_limits,
+            rate_limiter.clone(),
         )));
     }
 
@@ -136,6 +141,7 @@ async fn accept_loop(
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
     limits: ConnLimits,
+    rate_limiter: Arc<RateLimiter>,
 ) {
     let is_tls = tls.is_some();
     // Connections are served with upgrades (WebSocket), so we drain them
@@ -157,6 +163,7 @@ async fn accept_loop(
                         remote,
                         shutdown: shutdown.clone(),
                         limits,
+                        rate_limiter: rate_limiter.clone(),
                     };
                     // Handshake (TLS) runs inside the spawned task, off the accept
                     // loop, so a slow handshake can't stall accepting new connections.
@@ -214,6 +221,7 @@ struct ConnCtx {
     remote: std::net::SocketAddr,
     shutdown: watch::Receiver<bool>,
     limits: ConnLimits,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 /// Serve one connection (with upgrades) until it finishes or shutdown is
@@ -231,6 +239,7 @@ where
         remote,
         mut shutdown,
         limits,
+        rate_limiter,
     } = ctx;
 
     let service = service_fn(move |req| {
@@ -238,9 +247,20 @@ where
         let shared = shared.clone();
         let client = client.clone();
         let metrics = metrics.clone();
+        let rate_limiter = rate_limiter.clone();
         async move {
             Ok::<_, Infallible>(
-                handle(req, &listener_name, is_tls, shared, client, metrics, remote).await,
+                handle(
+                    req,
+                    &listener_name,
+                    is_tls,
+                    shared,
+                    client,
+                    metrics,
+                    rate_limiter,
+                    remote,
+                )
+                .await,
             )
         }
     });

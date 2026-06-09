@@ -270,6 +270,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 strip_prefix: false,
                 headers: None,
                 ip_access: None,
+                rate_limit: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -331,6 +332,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
                 strip_prefix: false,
                 headers: None,
                 ip_access: None,
+                rate_limit: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -779,6 +781,32 @@ async fn allowlist_excludes_unlisted_client_with_403() {
     wait_until_listening(proxy_port).await;
 
     assert_eq!(get(proxy_port).await.status(), 403);
+}
+
+#[tokio::test]
+async fn rate_limits_excess_requests_with_429() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    // rate 1/s, burst 2: first two pass, third is limited (refill negligible
+    // across back-to-back loopback requests).
+    cfg.listeners[0].routes[0].rate_limit = Some(gatepup_config::RateLimitConfig {
+        requests_per_second: 1.0,
+        burst: 2,
+    });
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    assert_eq!(get(proxy_port).await.status(), 200);
+    assert_eq!(get(proxy_port).await.status(), 200);
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 429);
+    assert_eq!(resp.headers().get("retry-after").unwrap(), "1");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("rate_limited"),
+        "body was: {body:?}"
+    );
 }
 
 #[tokio::test]

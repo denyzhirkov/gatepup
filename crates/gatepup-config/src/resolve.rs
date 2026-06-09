@@ -115,6 +115,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
                 strip_prefix: false,
                 headers: None,
                 ip_access: None,
+                rate_limit: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {

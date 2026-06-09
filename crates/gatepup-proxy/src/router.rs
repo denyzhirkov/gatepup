@@ -1,8 +1,33 @@
 use std::net::IpAddr;
 
-use gatepup_config::{parse_trusted_proxy, HeaderOpsConfig, IpAccessConfig, RouteConfig};
+use gatepup_config::{
+    parse_trusted_proxy, HeaderOpsConfig, IpAccessConfig, RateLimitConfig, RouteConfig,
+};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
 use ipnet::IpNet;
+
+/// Compiled token-bucket parameters for a route: refill `rate` (tokens/sec) and
+/// bucket `capacity` (burst). Bucket state itself lives in the shared limiter.
+#[derive(Clone, Copy)]
+pub(crate) struct RateLimit {
+    pub(crate) rate: f64,
+    pub(crate) capacity: f64,
+}
+
+impl RateLimit {
+    fn compile(cfg: &RateLimitConfig) -> Self {
+        // burst 0 -> default to ceil(rate), at least 1.
+        let capacity = if cfg.burst == 0 {
+            cfg.requests_per_second.ceil().max(1.0)
+        } else {
+            cfg.burst as f64
+        };
+        Self {
+            rate: cfg.requests_per_second,
+            capacity,
+        }
+    }
+}
 
 /// Client-IP access control for a route. `deny` always blocks (precedence); a
 /// non-empty `allow` restricts to listed networks (default-deny). Empty = allow
@@ -127,6 +152,8 @@ pub(crate) struct CompiledRoute {
     pub(crate) response_headers: HeaderOps,
     /// Client-IP access control (allow/deny).
     pub(crate) ip_access: IpAccess,
+    /// Per-client-IP token-bucket rate limit, if configured.
+    pub(crate) rate_limit: Option<RateLimit>,
 }
 
 /// Read-only view of a route for admin/introspection.
@@ -212,6 +239,7 @@ impl Router {
                         .as_ref()
                         .map(IpAccess::compile)
                         .unwrap_or_default(),
+                    rate_limit: r.rate_limit.as_ref().map(RateLimit::compile),
                 }
             })
             .collect();
@@ -254,6 +282,7 @@ mod tests {
             strip_prefix: false,
             headers: None,
             ip_access: None,
+            rate_limit: None,
         }
     }
 

@@ -15,7 +15,8 @@ pub use loader::load_from_file;
 pub use model::{
     AdminConfig, AppConfig, GatePupConfig, HeaderOpsConfig, HeaderRulesConfig, HealthCheckConfig,
     IpAccessConfig, LimitsConfig, ListenerConfig, LoadBalancing, MatchConfig, MetricsConfig,
-    Protocol, RetryConfig, RouteConfig, TargetConfig, TimeoutConfig, TlsConfig, UpstreamConfig,
+    Protocol, RateLimitConfig, RetryConfig, RouteConfig, TargetConfig, TimeoutConfig, TlsConfig,
+    UpstreamConfig,
 };
 pub use resolve::{resolve_config, ConfigSource};
 pub use validator::{parse_trusted_proxy, validate};
