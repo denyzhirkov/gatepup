@@ -21,9 +21,10 @@
           "name": "api",
           "match": {
             "host": "api.example.com",
-            "pathPrefix": "/"
+            "pathPrefix": "/api"
           },
-          "upstream": "api"
+          "upstream": "api",
+          "stripPrefix": true
         }
       ]
     }
@@ -79,6 +80,11 @@
   "timeouts": {
     "connectTimeoutMs": 5000,
     "requestTimeoutMs": 30000
+  },
+  "limits": {
+    "maxBodyBytes": 0,
+    "headerReadTimeoutMs": 15000,
+    "maxHeaderBytes": 0
   },
   "admin": {
     "enabled": true,

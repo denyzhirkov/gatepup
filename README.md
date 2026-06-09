@@ -147,6 +147,57 @@ Retries are opt-in per upstream. When enabled, a failed attempt is retried onto 
   non-retryable methods) stream through with a single attempt.
 - Retries increment the `gatepup_upstream_retries_total` metric.
 
+## Path rewrite
+
+By default the original request path is forwarded to the upstream as-is. Set
+`stripPrefix: true` on a route to remove the matched `pathPrefix` before
+forwarding — handy for mounting a service under a sub-path:
+
+```json
+{
+  "name": "api",
+  "match": { "host": "api.example.com", "pathPrefix": "/api" },
+  "upstream": "api",
+  "stripPrefix": true
+}
+```
+
+- `/api/users` → upstream sees `/users`; `/api` → `/`. The query string is
+  preserved.
+- The result is always normalized to start with `/`.
+- The prefix is matched as a plain string (same as routing), with no path-label
+  boundary: with `pathPrefix: "/api"`, a request to `/apidocs` strips to
+  `/docs`. Use a trailing slash in `pathPrefix` if you want a boundary.
+- Default is `false` — the path is forwarded unchanged.
+
+## Limits (DoS hardening)
+
+The optional `limits` block bounds what a single client can consume. Unlike
+`timeouts` (which bound the *upstream* round-trip), these protect the proxy from
+slow or oversized *inbound* requests:
+
+```json
+"limits": {
+  "maxBodyBytes": 10485760,
+  "headerReadTimeoutMs": 15000,
+  "maxHeaderBytes": 65536
+}
+```
+
+- **`maxBodyBytes`** — reject a request body larger than this with `413
+  payload_too_large`. A declared `Content-Length` over the cap is rejected up
+  front; an undeclared (chunked) body is cut mid-stream once it exceeds the cap.
+  `0` (default) means unlimited.
+- **`headerReadTimeoutMs`** — max time to receive the full request header from a
+  client (slowloris guard). A client that stalls mid-header has its connection
+  dropped. Default `15000`; `0` disables it.
+- **`maxHeaderBytes`** — bound the connection read buffer, which caps the request
+  header section. `0` (default) keeps hyper's built-in ~400 KB bound; when set it
+  must be at least `8192`.
+
+These are connection-level settings: a change takes effect on restart, not on a
+hot reload.
+
 ## Docker
 
 ```bash
