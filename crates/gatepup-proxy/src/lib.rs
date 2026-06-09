@@ -15,6 +15,7 @@ mod router;
 mod server;
 mod snapshot;
 mod tls;
+mod upstream_tls;
 
 use std::sync::Arc;
 

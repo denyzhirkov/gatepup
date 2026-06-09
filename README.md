@@ -142,6 +142,26 @@ plain HTTP — TLS is terminated at the edge.
 - Requests forwarded from a TLS listener carry `X-Forwarded-Proto: https`.
 - ACME / Let's Encrypt is not included yet (planned).
 
+### TLS to upstream
+
+Targets may be `https://` — GatePup speaks TLS to the backend, verifying its
+certificate against the **system root store** (install an internal CA there to
+trust private backends). For self-signed internal backends, opt out of
+verification per upstream:
+
+```json
+{
+  "name": "api",
+  "targets": [{ "url": "https://api-internal:8443" }],
+  "tlsInsecureSkipVerify": true
+}
+```
+
+- Default is `false` (verify). `tlsInsecureSkipVerify: true` accepts any cert —
+  use only for trusted internal networks.
+- Applies to both proxied requests and active health-check probes.
+- WebSocket upgrades currently reach the upstream over plain HTTP.
+
 ## Retries
 
 Retries are opt-in per upstream. When enabled, a failed attempt is retried onto a

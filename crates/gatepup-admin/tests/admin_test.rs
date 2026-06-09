@@ -64,6 +64,7 @@ fn sample_config() -> GatePupConfig {
                 unhealthy_threshold: 3,
             }),
             retries: None,
+            tls_insecure_skip_verify: false,
         }],
         timeouts: Default::default(),
         limits: Default::default(),

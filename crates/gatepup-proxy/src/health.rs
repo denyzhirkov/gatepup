@@ -19,16 +19,18 @@ use bytes::Bytes;
 use http::uri::PathAndQuery;
 use http::{Method, Request, Uri};
 use http_body_util::Empty;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
+use crate::error::ProxyError;
 use crate::snapshot::UpstreamRuntime;
 use crate::SharedConfig;
 
-pub(crate) type HealthClient = Client<HttpConnector, Empty<Bytes>>;
+pub(crate) type HealthClient = Client<HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 /// Active-probe settings for one upstream, derived from an enabled health check.
 #[derive(Clone)]
@@ -102,10 +104,12 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn build_health_client(connect_timeout: Duration) -> HealthClient {
-    let mut connector = HttpConnector::new();
-    connector.set_connect_timeout(Some(connect_timeout));
-    Client::builder(TokioExecutor::new()).build(connector)
+pub(crate) fn build_health_client(
+    connect_timeout: Duration,
+    insecure: bool,
+) -> Result<HealthClient, ProxyError> {
+    let connector = crate::upstream_tls::https_connector(connect_timeout, insecure)?;
+    Ok(Client::builder(TokioExecutor::new()).build(connector))
 }
 
 /// Background active-health loop for one upstream. Probes every target each
@@ -150,7 +154,21 @@ pub(crate) async fn run_health_supervisor(
     mut shutdown: watch::Receiver<bool>,
     mut reload: watch::Receiver<u64>,
 ) {
-    let client = build_health_client(connect_timeout);
+    // Verify + insecure probe clients, picked per upstream like the proxy path.
+    // If the TLS client can't be built, run without active health checks rather
+    // than crash the proxy.
+    let (verify_client, insecure_client) = match (
+        build_health_client(connect_timeout, false),
+        build_health_client(connect_timeout, true),
+    ) {
+        (Ok(v), Ok(i)) => (v, i),
+        _ => {
+            tracing::error!(
+                "failed to build health-check TLS client; active health checks disabled"
+            );
+            return;
+        }
+    };
     let mut gen_stop: Option<watch::Sender<bool>> = None;
 
     loop {
@@ -163,11 +181,16 @@ pub(crate) async fn run_health_supervisor(
         for (name, upstream) in &snapshot.upstreams {
             if let Some(settings) = upstream.health.clone() {
                 tracing::info!(upstream = %name, "active health checks enabled");
+                let client = if upstream.tls_insecure {
+                    insecure_client.clone()
+                } else {
+                    verify_client.clone()
+                };
                 tokio::spawn(run_health_checks(
                     name.clone(),
                     upstream.clone(),
                     settings,
-                    client.clone(),
+                    client,
                     shutdown.clone(),
                     stop_rx.clone(),
                 ));

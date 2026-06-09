@@ -11,6 +11,7 @@ use http::{Request, Response, StatusCode, Uri};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -19,6 +20,7 @@ use tokio::net::TcpStream;
 
 use gatepup_observability::Metrics;
 
+use crate::error::ProxyError;
 use crate::rate_limit::RateLimiter;
 use crate::snapshot::RuntimeConfig;
 use crate::{BoxError, SharedConfig};
@@ -43,12 +45,40 @@ const HOP_BY_HOP: &[&str] = &[
 /// Unified boxed body used for both the response we return and the request we
 /// send upstream (so streamed and buffered request bodies share one client type).
 pub(crate) type ResponseBody = BoxBody<Bytes, BoxError>;
-pub(crate) type ProxyClient = Client<HttpConnector, ResponseBody>;
+type HttpsClient = Client<HttpsConnector<HttpConnector>, ResponseBody>;
 
-pub(crate) fn build_client(connect_timeout: Duration) -> ProxyClient {
-    let mut connector = HttpConnector::new();
-    connector.set_connect_timeout(Some(connect_timeout));
-    Client::builder(TokioExecutor::new()).build(connector)
+/// Pooled upstream clients. `verify` validates `https://` upstream certificates
+/// against the system root store; `insecure` skips verification (opt-in per
+/// upstream). Both also serve plain `http://`.
+#[derive(Clone)]
+pub(crate) struct ProxyClient {
+    verify: HttpsClient,
+    insecure: HttpsClient,
+}
+
+impl ProxyClient {
+    fn for_upstream(&self, insecure: bool) -> &HttpsClient {
+        if insecure {
+            &self.insecure
+        } else {
+            &self.verify
+        }
+    }
+}
+
+pub(crate) fn build_client(connect_timeout: Duration) -> Result<ProxyClient, ProxyError> {
+    let build = |insecure| -> Result<HttpsClient, ProxyError> {
+        Ok(
+            Client::builder(TokioExecutor::new()).build(crate::upstream_tls::https_connector(
+                connect_timeout,
+                insecure,
+            )?),
+        )
+    };
+    Ok(ProxyClient {
+        verify: build(false)?,
+        insecure: build(true)?,
+    })
 }
 
 fn box_incoming(body: Incoming) -> ResponseBody {
@@ -327,7 +357,13 @@ async fn forward(
         let is_last = attempt + 1 == max_attempts;
 
         // Passive health: feed each proxied outcome into the target's state.
-        match tokio::time::timeout(snapshot.request_timeout, client.request(upstream_req)).await {
+        let attempt_client = client.for_upstream(upstream.tls_insecure);
+        match tokio::time::timeout(
+            snapshot.request_timeout,
+            attempt_client.request(upstream_req),
+        )
+        .await
+        {
             // Overall request timeout is NOT retried (the backend may have
             // already processed the request).
             Err(_elapsed) => {

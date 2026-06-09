@@ -422,6 +422,7 @@ mod tests {
             targets,
             health_check: None,
             retries: None,
+            tls_insecure_skip_verify: false,
         }
     }
 

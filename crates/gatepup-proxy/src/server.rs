@@ -64,7 +64,7 @@ pub async fn serve_shared(
     reload: watch::Receiver<u64>,
 ) -> Result<(), ProxyError> {
     let snapshot = shared.load_full();
-    let client = build_client(snapshot.connect_timeout);
+    let client = build_client(snapshot.connect_timeout)?;
     // Connection-level limits are fixed at startup (applied per accepted
     // connection); a reload that changes them takes effect on restart.
     let conn_limits = ConnLimits {

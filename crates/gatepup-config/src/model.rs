@@ -225,6 +225,10 @@ pub struct UpstreamConfig {
     pub health_check: Option<HealthCheckConfig>,
     #[serde(default)]
     pub retries: Option<RetryConfig>,
+    /// Skip TLS certificate verification for `https://` targets (for internal
+    /// self-signed backends). Default false = verify against the system roots.
+    #[serde(default)]
+    pub tls_insecure_skip_verify: bool,
 }
 
 /// Retry policy for an upstream. Off unless present and `enabled`. `attempts` is

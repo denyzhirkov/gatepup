@@ -292,6 +292,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 unhealthy_threshold: 1,
             }),
             retries: None,
+            tls_insecure_skip_verify: false,
         }],
         timeouts: Default::default(),
         limits: Default::default(),
@@ -344,6 +345,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
             }],
             health_check: None,
             retries: None,
+            tls_insecure_skip_verify: false,
         }],
         timeouts: Default::default(),
         limits: Default::default(),
@@ -466,6 +468,49 @@ fn self_signed() -> (String, String, CertificateDer<'static>) {
     (cert_path, key_path, cert.cert.der().clone())
 }
 
+/// A backend that serves HTTPS (self-signed) and answers `200 backend-ok`. Used
+/// to exercise TLS-to-upstream.
+async fn spawn_tls_backend() -> u16 {
+    use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_der = cert.cert.der().clone();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+    let acceptor = TlsAcceptor::from(std::sync::Arc::new(config));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(tls) = acceptor.accept(stream).await {
+                    let io = TokioIo::new(tls);
+                    let service = service_fn(|_req| async {
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                            b"backend-ok",
+                        ))))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                }
+            });
+        }
+    });
+    port
+}
+
 fn config_tls(proxy_port: u16, cert: &str, key: &str, backend_port: u16) -> GatePupConfig {
     let mut cfg = config(proxy_port, None, backend_port);
     cfg.listeners[0].protocol = Protocol::Https;
@@ -523,6 +568,41 @@ async fn tls_listener_proxies_and_sets_https_proto() {
     assert!(
         body.to_lowercase().contains("x-forwarded-proto: https"),
         "upstream did not see https proto; body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn proxies_to_https_upstream_with_insecure_skip_verify() {
+    let backend_port = spawn_tls_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.upstreams[0].targets[0].url = format!("https://127.0.0.1:{backend_port}");
+    cfg.upstreams[0].tls_insecure_skip_verify = true;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"backend-ok");
+}
+
+#[tokio::test]
+async fn https_upstream_without_skip_verify_fails_cert_check() {
+    let backend_port = spawn_tls_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.upstreams[0].targets[0].url = format!("https://127.0.0.1:{backend_port}");
+    // tls_insecure_skip_verify defaults false: the self-signed cert is untrusted.
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 502);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("upstream_connect_error"),
+        "body was: {body:?}"
     );
 }
 

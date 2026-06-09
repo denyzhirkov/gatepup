@@ -124,6 +124,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
             targets,
             health_check,
             retries: None,
+            tls_insecure_skip_verify: false,
         }],
         timeouts: TimeoutConfig::default(),
         limits: LimitsConfig::default(),

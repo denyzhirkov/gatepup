@@ -23,4 +23,7 @@ pub enum ProxyError {
 
     #[error("listener {listener:?} TLS setup failed: {message}")]
     Tls { listener: String, message: String },
+
+    #[error("upstream TLS client setup failed: {0}")]
+    UpstreamTls(String),
 }

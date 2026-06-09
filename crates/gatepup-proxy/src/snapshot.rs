@@ -88,6 +88,8 @@ pub(crate) struct UpstreamRuntime {
     pub(crate) health: Option<HealthCheckSettings>,
     /// Retry policy when retries are enabled for this upstream.
     pub(crate) retry: Option<RetryPolicy>,
+    /// Skip TLS verification for this upstream's `https://` targets.
+    pub(crate) tls_insecure: bool,
     /// Precomputed weighted schedule: target indices, each appearing in
     /// proportion to its weight (gcd-reduced, interleaved). Equal weights reduce
     /// to plain round-robin. Indexed lock-free via `next`.
@@ -301,6 +303,7 @@ fn build_snapshot_inner(
                 targets,
                 health: settings,
                 retry: upstream.retries.as_ref().and_then(RetryPolicy::from_config),
+                tls_insecure: upstream.tls_insecure_skip_verify,
                 schedule,
                 next: AtomicUsize::new(0),
             }),
@@ -373,6 +376,7 @@ mod tests {
                 .collect(),
             health: None,
             retry: None,
+            tls_insecure: false,
             schedule: build_schedule(weights),
             next: AtomicUsize::new(0),
         }
