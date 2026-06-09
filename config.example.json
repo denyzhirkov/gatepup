@@ -28,7 +28,8 @@
           "headers": {
             "request": { "set": { "X-Proxied-By": "gatepup" }, "remove": [] },
             "response": { "set": { "X-Frame-Options": "DENY" }, "remove": ["Server"] }
-          }
+          },
+          "ipAccess": { "allow": [], "deny": ["192.0.2.0/24"] }
         }
       ]
     }

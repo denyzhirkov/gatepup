@@ -136,6 +136,30 @@ fn check_listeners(
                 check_header_ops(&listener.name, &route.name, &rules.request, errors);
                 check_header_ops(&listener.name, &route.name, &rules.response, errors);
             }
+
+            if let Some(acl) = &route.ip_access {
+                check_ip_acl(&listener.name, &route.name, "allow", &acl.allow, errors);
+                check_ip_acl(&listener.name, &route.name, "deny", &acl.deny, errors);
+            }
+        }
+    }
+}
+
+fn check_ip_acl(
+    listener: &str,
+    route: &str,
+    field: &'static str,
+    entries: &[String],
+    errors: &mut Vec<ValidationError>,
+) {
+    for value in entries {
+        if parse_trusted_proxy(value).is_none() {
+            errors.push(ValidationError::InvalidIpAccessCidr {
+                listener: listener.to_string(),
+                route: route.to_string(),
+                field,
+                value: value.clone(),
+            });
         }
     }
 }
@@ -401,6 +425,7 @@ mod tests {
             upstream: upstream.to_string(),
             strip_prefix: false,
             headers: None,
+            ip_access: None,
         }
     }
 
@@ -820,6 +845,29 @@ mod tests {
                 set,
                 remove: vec!["Server".to_string()],
             },
+        });
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_ip_access_cidr() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].ip_access = Some(IpAccessConfig {
+            allow: vec!["10.0.0.0/8".into()],
+            deny: vec!["nonsense".into()],
+        });
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidIpAccessCidr { .. })));
+    }
+
+    #[test]
+    fn accepts_valid_ip_access() {
+        let mut cfg = valid_config();
+        cfg.listeners[0].routes[0].ip_access = Some(IpAccessConfig {
+            allow: vec!["10.0.0.0/8".into(), "192.168.1.1".into()],
+            deny: vec!["10.0.0.5".into(), "fd00::/8".into()],
         });
         assert!(validate(&cfg).is_ok());
     }

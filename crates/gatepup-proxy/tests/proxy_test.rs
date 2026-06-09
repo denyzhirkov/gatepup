@@ -269,6 +269,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
                 upstream: "u".to_string(),
                 strip_prefix: false,
                 headers: None,
+                ip_access: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -329,6 +330,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
                 upstream: "u".to_string(),
                 strip_prefix: false,
                 headers: None,
+                ip_access: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {
@@ -727,6 +729,56 @@ async fn applies_route_header_rules() {
         !seen.contains("x-forwarded-proto:"),
         "remove failed in {seen:?}"
     );
+}
+
+fn ip_acl(allow: &[&str], deny: &[&str]) -> gatepup_config::IpAccessConfig {
+    gatepup_config::IpAccessConfig {
+        allow: allow.iter().map(|s| s.to_string()).collect(),
+        deny: deny.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[tokio::test]
+async fn denies_blocked_client_ip_with_403() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.listeners[0].routes[0].ip_access = Some(ip_acl(&[], &["127.0.0.1/32"]));
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get(proxy_port).await;
+    assert_eq!(resp.status(), 403);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("forbidden"),
+        "body was: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn allows_permitted_client_ip() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.listeners[0].routes[0].ip_access = Some(ip_acl(&["127.0.0.1/32"], &[]));
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    assert_eq!(get(proxy_port).await.status(), 200);
+}
+
+#[tokio::test]
+async fn allowlist_excludes_unlisted_client_with_403() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    // Allowlist that does not include loopback -> default-deny.
+    cfg.listeners[0].routes[0].ip_access = Some(ip_acl(&["10.0.0.0/8"], &[]));
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    assert_eq!(get(proxy_port).await.status(), 403);
 }
 
 #[tokio::test]

@@ -138,6 +138,22 @@ pub struct RouteConfig {
     /// Header rewrites applied to the upstream request and the client response.
     #[serde(default)]
     pub headers: Option<HeaderRulesConfig>,
+    /// Client IP allow/deny filtering (CIDRs), evaluated on the resolved client IP.
+    #[serde(default)]
+    pub ip_access: Option<IpAccessConfig>,
+}
+
+/// Client IP access control for a route. `deny` always blocks (takes precedence);
+/// a non-empty `allow` restricts to listed networks (default-deny). Entries are
+/// CIDRs or bare IPs. Evaluated against the resolved client IP (see trusted
+/// proxies), not the raw peer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IpAccessConfig {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 /// Per-route header rewrites: applied to the request before forwarding upstream

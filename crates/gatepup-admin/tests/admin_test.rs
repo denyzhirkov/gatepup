@@ -44,6 +44,7 @@ fn sample_config() -> GatePupConfig {
                 upstream: "api".to_string(),
                 strip_prefix: false,
                 headers: None,
+                ip_access: None,
             }],
         }],
         upstreams: vec![UpstreamConfig {

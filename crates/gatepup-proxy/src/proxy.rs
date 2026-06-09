@@ -102,6 +102,7 @@ async fn prepare_body_source(body: Incoming, replayable: bool, max_body_bytes: u
 #[derive(Debug, Clone, Copy)]
 enum GatewayError {
     RouteNotFound,
+    Forbidden,
     PayloadTooLarge,
     UpstreamMissing,
     NoHealthyUpstream,
@@ -114,6 +115,7 @@ impl GatewayError {
     fn parts(self) -> (StatusCode, &'static str) {
         match self {
             GatewayError::RouteNotFound => (StatusCode::NOT_FOUND, "route_not_found"),
+            GatewayError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             GatewayError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             GatewayError::NoHealthyUpstream => {
                 (StatusCode::SERVICE_UNAVAILABLE, "no_healthy_upstream")
@@ -131,7 +133,7 @@ impl GatewayError {
     fn is_client_error(self) -> bool {
         matches!(
             self,
-            GatewayError::RouteNotFound | GatewayError::PayloadTooLarge
+            GatewayError::RouteNotFound | GatewayError::Forbidden | GatewayError::PayloadTooLarge
         )
     }
 }
@@ -180,6 +182,7 @@ pub(crate) async fn handle(
             &host,
             scheme,
             remote,
+            client_ip,
             &request_id,
             &metrics,
         )
@@ -194,6 +197,7 @@ pub(crate) async fn handle(
             &host,
             scheme,
             remote,
+            client_ip,
             &request_id,
         )
         .await
@@ -239,6 +243,7 @@ async fn forward(
     host: &str,
     scheme: &str,
     remote: SocketAddr,
+    client_ip: IpAddr,
     request_id: &str,
 ) -> Result<Forwarded, GatewayError> {
     // The listener's router comes from the current snapshot (it may have been
@@ -252,6 +257,9 @@ async fn forward(
     let route = router
         .match_route(host, req.uri().path())
         .ok_or(GatewayError::RouteNotFound)?;
+    if !route.ip_access.allows(client_ip) {
+        return Err(GatewayError::Forbidden);
+    }
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
     let upstream = snapshot
@@ -378,6 +386,7 @@ async fn handle_upgrade(
     host: &str,
     scheme: &str,
     remote: SocketAddr,
+    client_ip: IpAddr,
     request_id: &str,
     metrics: &Metrics,
 ) -> Result<Forwarded, GatewayError> {
@@ -390,6 +399,9 @@ async fn handle_upgrade(
     let route = router
         .match_route(host, req.uri().path())
         .ok_or(GatewayError::RouteNotFound)?;
+    if !route.ip_access.allows(client_ip) {
+        return Err(GatewayError::Forbidden);
+    }
     let route_name = route.name.clone();
     let upstream_name = route.upstream.clone();
     let upstream = snapshot

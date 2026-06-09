@@ -1,5 +1,37 @@
-use gatepup_config::{HeaderOpsConfig, RouteConfig};
+use std::net::IpAddr;
+
+use gatepup_config::{parse_trusted_proxy, HeaderOpsConfig, IpAccessConfig, RouteConfig};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri};
+use ipnet::IpNet;
+
+/// Client-IP access control for a route. `deny` always blocks (precedence); a
+/// non-empty `allow` restricts to listed networks (default-deny). Empty = allow
+/// all. Built from already-validated config; unparseable entries are dropped.
+#[derive(Default)]
+pub(crate) struct IpAccess {
+    allow: Vec<IpNet>,
+    deny: Vec<IpNet>,
+}
+
+impl IpAccess {
+    fn compile(cfg: &IpAccessConfig) -> Self {
+        let parse = |v: &[String]| v.iter().filter_map(|s| parse_trusted_proxy(s)).collect();
+        Self {
+            allow: parse(&cfg.allow),
+            deny: parse(&cfg.deny),
+        }
+    }
+
+    pub(crate) fn allows(&self, ip: IpAddr) -> bool {
+        if self.deny.iter().any(|net| net.contains(&ip)) {
+            return false;
+        }
+        if !self.allow.is_empty() && !self.allow.iter().any(|net| net.contains(&ip)) {
+            return false;
+        }
+        true
+    }
+}
 
 /// Compiled header rewrite for one direction: `remove` runs, then `set` (so an
 /// explicit `set` always wins). Built from already-validated config; any
@@ -93,6 +125,8 @@ pub(crate) struct CompiledRoute {
     /// Header rewrites for the upstream request and the client response.
     pub(crate) request_headers: HeaderOps,
     pub(crate) response_headers: HeaderOps,
+    /// Client-IP access control (allow/deny).
+    pub(crate) ip_access: IpAccess,
 }
 
 /// Read-only view of a route for admin/introspection.
@@ -173,6 +207,11 @@ impl Router {
                         .as_ref()
                         .map(|h| HeaderOps::compile(&h.response))
                         .unwrap_or_default(),
+                    ip_access: r
+                        .ip_access
+                        .as_ref()
+                        .map(IpAccess::compile)
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -214,6 +253,7 @@ mod tests {
             upstream: name_upstream.to_string(),
             strip_prefix: false,
             headers: None,
+            ip_access: None,
         }
     }
 
@@ -244,6 +284,39 @@ mod tests {
         let mut h = HeaderMap::new();
         ops.apply(&mut h); // must not panic; invalid entries are dropped
         assert!(h.is_empty());
+    }
+
+    fn acl(allow: &[&str], deny: &[&str]) -> IpAccess {
+        IpAccess::compile(&IpAccessConfig {
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn ip_access_empty_allows_all() {
+        assert!(IpAccess::default().allows("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn ip_access_deny_blocks() {
+        let a = acl(&[], &["10.0.0.0/8"]);
+        assert!(!a.allows("10.1.2.3".parse().unwrap()));
+        assert!(a.allows("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn ip_access_allowlist_restricts() {
+        let a = acl(&["192.168.0.0/16"], &[]);
+        assert!(a.allows("192.168.1.1".parse().unwrap()));
+        assert!(!a.allows("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn ip_access_deny_wins_over_allow() {
+        let a = acl(&["10.0.0.0/8"], &["10.0.0.5"]);
+        assert!(a.allows("10.0.0.1".parse().unwrap()));
+        assert!(!a.allows("10.0.0.5".parse().unwrap()));
     }
 
     #[test]

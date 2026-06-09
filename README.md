@@ -262,8 +262,28 @@ proxy, list those hops in `trustedProxies` so the real client is read from
   ignored entirely — a spoofed header can never override the source address.
 - Empty (default) means the direct TCP peer is always the client.
 
-This resolved client IP is what upcoming IP allow/deny and rate-limiting features
-will key on, so it must be correct behind your edge.
+This resolved client IP is what IP access control (below) and upcoming
+rate-limiting key on, so it must be correct behind your edge.
+
+## IP access control
+
+A route can allow/deny clients by IP, evaluated against the **resolved client IP**
+(so it respects `trustedProxies`, not a spoofable header):
+
+```json
+{
+  "name": "admin",
+  "match": { "pathPrefix": "/admin" },
+  "upstream": "admin",
+  "ipAccess": { "allow": ["10.0.0.0/8", "192.168.0.0/16"], "deny": ["10.6.6.6"] }
+}
+```
+
+- Entries are CIDRs or bare IPs. A denied client gets `403 forbidden`.
+- **`deny` always wins.** A non-empty **`allow`** turns the route default-deny —
+  only listed networks pass. Empty `allow` (default) permits everyone except
+  `deny`.
+- Applies to normal and WebSocket requests, after the route matches.
 
 ## Docker
 

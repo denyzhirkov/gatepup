@@ -14,8 +14,8 @@ pub use error::{ConfigError, ValidationError};
 pub use loader::load_from_file;
 pub use model::{
     AdminConfig, AppConfig, GatePupConfig, HeaderOpsConfig, HeaderRulesConfig, HealthCheckConfig,
-    LimitsConfig, ListenerConfig, LoadBalancing, MatchConfig, MetricsConfig, Protocol, RetryConfig,
-    RouteConfig, TargetConfig, TimeoutConfig, TlsConfig, UpstreamConfig,
+    IpAccessConfig, LimitsConfig, ListenerConfig, LoadBalancing, MatchConfig, MetricsConfig,
+    Protocol, RetryConfig, RouteConfig, TargetConfig, TimeoutConfig, TlsConfig, UpstreamConfig,
 };
 pub use resolve::{resolve_config, ConfigSource};
 pub use validator::{parse_trusted_proxy, validate};

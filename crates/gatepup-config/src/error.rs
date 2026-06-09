@@ -155,4 +155,12 @@ pub enum ValidationError {
         route: String,
         name: String,
     },
+
+    #[error("route {route:?} in listener {listener:?} has an invalid ipAccess {field} entry {value:?} (expected IP or CIDR)")]
+    InvalidIpAccessCidr {
+        listener: String,
+        route: String,
+        field: &'static str,
+        value: String,
+    },
 }
