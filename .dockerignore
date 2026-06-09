@@ -1,4 +1,9 @@
 target/
 .git/
+.github/
 .kungfu/
+.claude/
+.tsk/
+.env
+.env.*
 **/*.md
