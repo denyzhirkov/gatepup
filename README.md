@@ -1,25 +1,44 @@
 # GatePup
 
+```text
+        / \__
+       (    @\___        GatePup
+       /         O       tiny watchdog at your gate
+      /   (_____/        fast · resilient · JSON-configured
+     /_____/   U
+                         client  ──▶  [ gatepup ]  ──▶  backend
+```
+
+[![CI](https://github.com/denyzhirkov/gatepup/actions/workflows/docker.yml/badge.svg)](https://github.com/denyzhirkov/gatepup/actions/workflows/docker.yml)
+[![Docker Hub](https://img.shields.io/docker/v/denyzhirkov/gatepup?sort=semver&logo=docker&label=docker%20hub)](https://hub.docker.com/r/denyzhirkov/gatepup)
+[![Docker Pulls](https://img.shields.io/docker/pulls/denyzhirkov/gatepup?logo=docker)](https://hub.docker.com/r/denyzhirkov/gatepup)
+[![Image Size](https://img.shields.io/docker/image-size/denyzhirkov/gatepup?sort=semver&logo=docker)](https://hub.docker.com/r/denyzhirkov/gatepup)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Tiny watchdog for your web traffic.
 
 GatePup is a lightweight, ultra-fast and resilient reverse proxy written in Rust.
 It is designed for simple Docker-based deployments, self-hosted apps and small
 production environments where traditional reverse proxies may feel too complex.
 
-> **Status:** MVP in progress (v0.1). Working today: config model/loader/validator,
-> CLI (`run` / `validate` / `print-config`), HTTP/1.1 reverse proxy with host/path
-> routing, round-robin upstreams, active + passive health checks, structured JSON
-> access logs, Prometheus metrics, and the admin API. Not yet: TLS, WebSocket,
-> retries, hot reload (see roadmap).
+> **Status:** `v1.0.0` released and load-tested (~70k rps, no leak over a 10-min
+> soak). Working today: HTTP/1.1 reverse proxy with host/path routing and path
+> rewrite, weighted round-robin upstreams, active + passive health checks, retries,
+> TLS termination (rustls), WebSocket tunneling, hot config reload (SIGHUP),
+> env-based / file-less config, request-body & client-header DoS limits, structured
+> JSON access logs, Prometheus metrics, and a read-only admin API. See the
+> [roadmap](ROADMAP.md).
 
 ## What it does
 
-- HTTP/1.1 reverse proxy
-- Host- and path-prefix routing
-- Upstream groups with round-robin load balancing
+- HTTP/1.1 reverse proxy with streaming bodies and WebSocket tunneling
+- Host- and path-prefix routing (incl. wildcard hosts) with optional prefix strip
+- Upstream groups with weighted round-robin, retries, and connection reuse
 - Active and passive health checks (opt-in per upstream)
-- Structured JSON access logs, Prometheus metrics, admin API
-- A single human-readable JSON config
+- TLS termination (rustls), hot config reload (SIGHUP), graceful drain on shutdown
+- DoS limits: request body size + client header timeouts
+- Structured JSON access logs, Prometheus metrics, read-only admin API
+- A single human-readable JSON config — or run file-less from `GATEPUP_*` env vars
 
 ## What it is *not*
 
@@ -200,6 +219,15 @@ hot reload.
 
 ## Docker
 
+Pull the published image from [Docker Hub](https://hub.docker.com/r/denyzhirkov/gatepup)
+(`:latest` = newest release, `:edge` = latest `main`):
+
+```bash
+docker pull denyzhirkov/gatepup:latest
+```
+
+Or run the bundled compose demo:
+
 ```bash
 docker compose up --build
 # proxy on http://localhost:80, admin/metrics on http://localhost:8080
@@ -219,7 +247,7 @@ environment*), exposes ports 80 and 8080, and has a container `HEALTHCHECK`
 # config-free container (no mounted file)
 docker run -p 80:80 -p 8080:8080 \
   -e GATEPUP_LISTEN=0.0.0.0:80 -e GATEPUP_UPSTREAM=http://api:4000 \
-  -e GATEPUP_ADMIN=0.0.0.0:8080 gatepup/gatepup:latest
+  -e GATEPUP_ADMIN=0.0.0.0:8080 denyzhirkov/gatepup:latest
 ```
 
 > The compose demo binds the admin API to `0.0.0.0:8080` so it's reachable from
@@ -271,7 +299,8 @@ See [`config.example.json`](./config.example.json) for a full example. A config
 declares `listeners` (with routes that match on host + path prefix), `upstreams`
 (target groups with weighted round-robin — each target has an optional `weight`,
 default 1 — and optional health checks), `timeouts` (`connectTimeoutMs` /
-`requestTimeoutMs`), and optional `admin` / `metrics` sections.
+`requestTimeoutMs`), `limits` (request body size + client header timeouts), and
+optional `admin` / `metrics` sections.
 
 ## Development
 
@@ -282,16 +311,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Project conventions live in [`CLAUDE.md`](./CLAUDE.md); scope and roadmap in
-[`gatepup_master_prompt.md`](./gatepup_master_prompt.md).
+The roadmap and standing engineering principles live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Roadmap
 
-- **v0.1** — core HTTP proxy, routing, upstreams, round-robin, health checks, metrics, JSON logs, Docker image.
-- **v0.2** — hot reload, WebSocket, least-connections, retries, request IDs, header rewrite.
-- **v0.3** — TLS termination (rustls), ACME, rate limiting, IP allow/deny, basic auth, compression.
-- **v0.4** — admin REST API, UI dashboard, safe reload.
+Shipped: HTTP/1.1 proxy, host/path routing (+ wildcard hosts, prefix strip),
+weighted round-robin, health checks, retries, TLS termination, WebSocket, hot
+reload, env/file-less config, Alpine image, observability, request/header DoS
+limits, graceful drain.
+
+Next: header manipulation, rate limiting, admin API auth, ACME/Let's Encrypt,
+more balancing strategies (least-connections / ip-hash), compression, HTTP/2. Full
+list in [`ROADMAP.md`](./ROADMAP.md).
 
 ## License
 
-MIT.
+[MIT](LICENSE).
