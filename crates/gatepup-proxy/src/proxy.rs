@@ -61,7 +61,7 @@ fn box_bytes(bytes: Bytes) -> ResponseBody {
 /// or a single-shot streamed body that can be sent only once.
 enum BodySource {
     Buffered(Bytes),
-    Once(Option<Incoming>),
+    Once(Option<ResponseBody>),
 }
 
 impl BodySource {
@@ -70,30 +70,38 @@ impl BodySource {
     fn next(&mut self) -> Option<ResponseBody> {
         match self {
             BodySource::Buffered(bytes) => Some(box_bytes(bytes.clone())),
-            BodySource::Once(slot) => slot.take().map(box_incoming),
+            BodySource::Once(slot) => slot.take(),
         }
     }
 }
 
 /// Decide whether the request body can be buffered for replay, and produce the
 /// matching [`BodySource`]. Buffering is bounded by [`BODY_BUFFER_CAP`]; bodies
-/// that exceed it (or fail to read) fall back to a single streamed attempt.
-async fn prepare_body_source(body: Incoming, replayable: bool) -> BodySource {
-    if !replayable {
-        return BodySource::Once(Some(body));
+/// that exceed it (or fail to read) fall back to a single streamed attempt. A
+/// non-zero `max_body_bytes` wraps the streamed body so it is cut if it exceeds
+/// the cap mid-stream (declared-oversize bodies are rejected earlier with 413).
+async fn prepare_body_source(body: Incoming, replayable: bool, max_body_bytes: u64) -> BodySource {
+    if replayable {
+        return match Limited::new(body, BODY_BUFFER_CAP).collect().await {
+            Ok(collected) => BodySource::Buffered(collected.to_bytes()),
+            // Over the cap or a read error: can't safely replay, and the original
+            // body is now consumed — surface as a single (already-consumed) attempt.
+            Err(_) => BodySource::Once(None),
+        };
     }
-    match Limited::new(body, BODY_BUFFER_CAP).collect().await {
-        Ok(collected) => BodySource::Buffered(collected.to_bytes()),
-        // Over the cap or a read error: can't safely replay, and the original
-        // body is now consumed — surface as a single (already-consumed) attempt.
-        Err(_) => BodySource::Once(None),
-    }
+    let boxed = if max_body_bytes > 0 {
+        Limited::new(body, max_body_bytes as usize).boxed()
+    } else {
+        box_incoming(body)
+    };
+    BodySource::Once(Some(boxed))
 }
 
 /// Per-request failure that maps to a specific HTTP status + JSON error body.
 #[derive(Debug, Clone, Copy)]
 enum GatewayError {
     RouteNotFound,
+    PayloadTooLarge,
     UpstreamMissing,
     NoHealthyUpstream,
     UpstreamTimeout,
@@ -105,6 +113,7 @@ impl GatewayError {
     fn parts(self) -> (StatusCode, &'static str) {
         match self {
             GatewayError::RouteNotFound => (StatusCode::NOT_FOUND, "route_not_found"),
+            GatewayError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             GatewayError::NoHealthyUpstream => {
                 (StatusCode::SERVICE_UNAVAILABLE, "no_healthy_upstream")
             }
@@ -114,6 +123,15 @@ impl GatewayError {
                 (StatusCode::BAD_GATEWAY, "bad_gateway")
             }
         }
+    }
+
+    /// Client-side rejections (4xx) are not upstream failures and must not be
+    /// counted against upstream error metrics.
+    fn is_client_error(self) -> bool {
+        matches!(
+            self,
+            GatewayError::RouteNotFound | GatewayError::PayloadTooLarge
+        )
     }
 }
 
@@ -180,7 +198,7 @@ pub(crate) async fn handle(
         Err(err) => {
             if matches!(err, GatewayError::RouteNotFound) {
                 metrics.inc_route_not_found();
-            } else {
+            } else if !err.is_client_error() {
                 metrics.inc_upstream_errors();
             }
             (error_response(err, &request_id), None, None)
@@ -234,6 +252,10 @@ async fn forward(
 
     let (mut parts, body) = req.into_parts();
     let method = parts.method.clone();
+    // Reject a declared-oversize body before touching the upstream.
+    if body_exceeds_limit(&parts.headers, snapshot.max_body_bytes) {
+        return Err(GatewayError::PayloadTooLarge);
+    }
     let upstream_pq = route.rewritten_path_and_query(&parts.uri);
     rewrite_headers(&mut parts.headers, host, scheme, remote.ip(), request_id);
 
@@ -245,7 +267,7 @@ async fn forward(
         }
         _ => false,
     };
-    let mut body_source = prepare_body_source(body, replayable).await;
+    let mut body_source = prepare_body_source(body, replayable, snapshot.max_body_bytes).await;
 
     // Retries only when the body is replayable; otherwise a single attempt.
     let policy = upstream.retry.as_ref();
@@ -495,6 +517,13 @@ fn build_attempt_request(
     builder.body(body).ok()
 }
 
+/// True when a declared `Content-Length` exceeds the configured cap. `0` means
+/// no cap. Undeclared (e.g. chunked) bodies pass here and are bounded mid-stream
+/// by the [`BodySource`] wrapper instead.
+fn body_exceeds_limit(headers: &HeaderMap, max_body_bytes: u64) -> bool {
+    max_body_bytes > 0 && content_length(headers).is_some_and(|len| len as u64 > max_body_bytes)
+}
+
 fn content_length(headers: &HeaderMap) -> Option<usize> {
     headers
         .get(header::CONTENT_LENGTH)?
@@ -604,6 +633,7 @@ mod tests {
     fn gateway_errors_map_to_expected_status_and_code() {
         let cases = [
             (GatewayError::RouteNotFound, 404, "route_not_found"),
+            (GatewayError::PayloadTooLarge, 413, "payload_too_large"),
             (GatewayError::NoHealthyUpstream, 503, "no_healthy_upstream"),
             (GatewayError::UpstreamTimeout, 504, "upstream_timeout"),
             (GatewayError::UpstreamConnect, 502, "upstream_connect_error"),
@@ -626,6 +656,38 @@ mod tests {
             "application/json"
         );
         assert_eq!(resp.headers().get("x-request-id").unwrap(), "rid-123");
+    }
+
+    fn headers_with_content_length(len: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from_str(len).unwrap());
+        h
+    }
+
+    #[test]
+    fn body_limit_zero_means_unlimited() {
+        assert!(!body_exceeds_limit(
+            &headers_with_content_length("99999999"),
+            0
+        ));
+    }
+
+    #[test]
+    fn body_within_limit_is_allowed() {
+        assert!(!body_exceeds_limit(&headers_with_content_length("10"), 10));
+        assert!(!body_exceeds_limit(&headers_with_content_length("9"), 10));
+    }
+
+    #[test]
+    fn declared_oversize_body_exceeds_limit() {
+        assert!(body_exceeds_limit(&headers_with_content_length("11"), 10));
+    }
+
+    #[test]
+    fn undeclared_body_passes_content_length_check() {
+        // No Content-Length (e.g. chunked) is not rejected up front; it is bounded
+        // mid-stream by the BodySource wrapper instead.
+        assert!(!body_exceeds_limit(&HeaderMap::new(), 10));
     }
 
     #[test]

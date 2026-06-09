@@ -123,6 +123,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
             retries: None,
         }],
         timeouts: TimeoutConfig::default(),
+        limits: LimitsConfig::default(),
         admin: None,
         metrics: None,
     }

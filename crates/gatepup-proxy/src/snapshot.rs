@@ -61,6 +61,13 @@ pub struct RuntimeConfig {
     pub(crate) connect_timeout: Duration,
     /// Timeout for the whole upstream round-trip (mapped to 504 on expiry).
     pub(crate) request_timeout: Duration,
+    /// Max request body bytes; `0` = unlimited. A larger body is rejected (413).
+    pub(crate) max_body_bytes: u64,
+    /// Header-read timeout (slowloris guard); `None` = disabled. Connection-level.
+    pub(crate) header_read_timeout: Option<Duration>,
+    /// Max connection read-buffer bytes (bounds the header section); `None` keeps
+    /// hyper's default. Connection-level.
+    pub(crate) max_header_bytes: Option<usize>,
 }
 
 pub(crate) struct ListenerRuntime {
@@ -321,11 +328,16 @@ fn build_snapshot_inner(
         }));
     }
 
+    let limits = &config.limits;
     Ok(RuntimeConfig {
         listeners,
         upstreams,
         connect_timeout: Duration::from_millis(config.timeouts.connect_timeout_ms),
         request_timeout: Duration::from_millis(config.timeouts.request_timeout_ms),
+        max_body_bytes: limits.max_body_bytes,
+        header_read_timeout: (limits.header_read_timeout_ms > 0)
+            .then(|| Duration::from_millis(limits.header_read_timeout_ms)),
+        max_header_bytes: (limits.max_header_bytes > 0).then_some(limits.max_header_bytes),
     })
 }
 

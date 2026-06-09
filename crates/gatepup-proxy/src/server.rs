@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 use gatepup_observability::Metrics;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -18,6 +18,14 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Max time for a TLS handshake before the connection is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connection-level inbound limits, fixed from the initial snapshot (they apply
+/// when building each connection, like the bind address and TLS acceptor).
+#[derive(Clone, Copy)]
+struct ConnLimits {
+    header_read_timeout: Option<Duration>,
+    max_header_bytes: Option<usize>,
+}
 
 use crate::error::ProxyError;
 use crate::health::run_health_supervisor;
@@ -56,6 +64,12 @@ pub async fn serve_shared(
 ) -> Result<(), ProxyError> {
     let snapshot = shared.load_full();
     let client = build_client(snapshot.connect_timeout);
+    // Connection-level limits are fixed at startup (applied per accepted
+    // connection); a reload that changes them takes effect on restart.
+    let conn_limits = ConnLimits {
+        header_read_timeout: snapshot.header_read_timeout,
+        max_header_bytes: snapshot.max_header_bytes,
+    };
 
     let mut handles = Vec::with_capacity(snapshot.listeners.len());
     for listener in &snapshot.listeners {
@@ -76,6 +90,7 @@ pub async fn serve_shared(
             client.clone(),
             metrics.clone(),
             shutdown.clone(),
+            conn_limits,
         )));
     }
 
@@ -111,6 +126,7 @@ pub async fn run(snapshot: Arc<RuntimeConfig>) -> Result<(), ProxyError> {
     serve(snapshot, metrics, shutdown_rx).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     tcp: TcpListener,
     listener_name: Arc<str>,
@@ -119,6 +135,7 @@ async fn accept_loop(
     client: ProxyClient,
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
+    limits: ConnLimits,
 ) {
     let is_tls = tls.is_some();
     // Connections are served with upgrades (WebSocket), so we drain them
@@ -139,6 +156,7 @@ async fn accept_loop(
                         is_tls,
                         remote,
                         shutdown: shutdown.clone(),
+                        limits,
                     };
                     // Handshake (TLS) runs inside the spawned task, off the accept
                     // loop, so a slow handshake can't stall accepting new connections.
@@ -195,6 +213,7 @@ struct ConnCtx {
     is_tls: bool,
     remote: std::net::SocketAddr,
     shutdown: watch::Receiver<bool>,
+    limits: ConnLimits,
 }
 
 /// Serve one connection (with upgrades) until it finishes or shutdown is
@@ -211,6 +230,7 @@ where
         is_tls,
         remote,
         mut shutdown,
+        limits,
     } = ctx;
 
     let service = service_fn(move |req| {
@@ -225,9 +245,17 @@ where
         }
     });
 
-    let conn = http1::Builder::new()
-        .serve_connection(io, service)
-        .with_upgrades();
+    let mut builder = http1::Builder::new();
+    if let Some(timeout) = limits.header_read_timeout {
+        // hyper panics if header_read_timeout is set without a timer.
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(timeout);
+    }
+    if let Some(max) = limits.max_header_bytes {
+        builder.max_buf_size(max);
+    }
+    let conn = builder.serve_connection(io, service).with_upgrades();
     let mut conn = std::pin::pin!(conn);
     tokio::select! {
         result = conn.as_mut() => {

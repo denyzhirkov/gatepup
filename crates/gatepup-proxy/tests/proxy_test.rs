@@ -16,6 +16,7 @@ use hyper::service::service_fn;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
@@ -290,6 +291,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
             retries: None,
         }],
         timeouts: Default::default(),
+        limits: Default::default(),
         admin: None,
         metrics: None,
     }
@@ -337,6 +339,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
             retries: None,
         }],
         timeouts: Default::default(),
+        limits: Default::default(),
         admin: None,
         metrics: None,
     }
@@ -603,6 +606,81 @@ async fn proxies_request_to_backend() {
     assert_eq!(resp.status(), 200);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"backend-ok");
+}
+
+async fn post_body(port: u16, len: usize) -> Response<hyper::body::Incoming> {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://127.0.0.1:{port}/"))
+        .body(Full::new(Bytes::from(vec![b'x'; len])))
+        .unwrap();
+    client().request(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn rejects_oversize_body_with_413() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.limits.max_body_bytes = 10;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = post_body(proxy_port, 100).await;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("payload_too_large"),
+        "body was: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn forwards_body_within_limit() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.limits.max_body_bytes = 1000;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = post_body(proxy_port, 50).await;
+    assert_eq!(resp.status(), 200);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"backend-ok");
+}
+
+#[tokio::test]
+async fn slow_request_header_is_dropped_by_header_read_timeout() {
+    let backend_port = spawn_backend().await;
+    let proxy_port = free_port();
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.limits.header_read_timeout_ms = 300;
+    spawn_proxy(cfg).await;
+    wait_until_listening(proxy_port).await;
+
+    // Send a partial request head and never terminate it. The server must close
+    // the connection once the header-read timeout elapses.
+    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 64];
+    // Read should resolve (EOF or a response) well within this bound; if the
+    // connection were held open forever, this read would block past the timeout.
+    let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+        .await
+        .expect("connection was not closed after the header-read timeout")
+        .unwrap();
+    // hyper closes the connection (EOF = 0) or sends an error response; either way
+    // the slow client does not keep the connection indefinitely.
+    assert!(
+        n == 0 || buf.starts_with(b"HTTP/1.1 4"),
+        "expected connection close or 4xx, read {n} bytes: {:?}",
+        String::from_utf8_lossy(&buf[..n])
+    );
 }
 
 #[tokio::test]

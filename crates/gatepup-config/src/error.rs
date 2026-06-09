@@ -80,6 +80,9 @@ pub enum ValidationError {
     #[error("timeout {field:?} must be greater than zero")]
     ZeroTimeout { field: &'static str },
 
+    #[error("limits maxHeaderBytes {value} must be 0 (hyper default) or at least 8192")]
+    MaxHeaderBytesTooSmall { value: usize },
+
     #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
     ZeroWeight { upstream: String, url: String },
 

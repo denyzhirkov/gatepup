@@ -11,9 +11,45 @@ pub struct GatePupConfig {
     #[serde(default)]
     pub timeouts: TimeoutConfig,
     #[serde(default)]
+    pub limits: LimitsConfig,
+    #[serde(default)]
     pub admin: Option<AdminConfig>,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
+}
+
+/// Inbound resource limits (DoS hardening). Distinct from `timeouts`, which
+/// bound the *upstream* round-trip; these bound what a *client* can consume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// Max request body size in bytes; a larger body is rejected with 413.
+    /// `0` (default) means unlimited — bodies stream through unbounded.
+    #[serde(default)]
+    pub max_body_bytes: u64,
+    /// Max time to read the full request header from a client (slowloris guard).
+    /// `0` disables it. Default 15s.
+    #[serde(default = "default_header_read_timeout_ms")]
+    pub header_read_timeout_ms: u64,
+    /// Max bytes for the connection read buffer, which bounds the request header
+    /// section. `0` (default) keeps hyper's built-in ~400KB bound. When set, must
+    /// be at least 8192 (hyper's floor).
+    #[serde(default)]
+    pub max_header_bytes: usize,
+}
+
+fn default_header_read_timeout_ms() -> u64 {
+    15_000
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 0,
+            header_read_timeout_ms: default_header_read_timeout_ms(),
+            max_header_bytes: 0,
+        }
+    }
 }
 
 /// Proxy timeouts. `connect` bounds establishing the upstream connection;

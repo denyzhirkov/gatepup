@@ -18,6 +18,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
     check_retries(config, &mut errors);
     check_admin(config, &mut errors);
     check_timeouts(config, &mut errors);
+    check_limits(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -272,6 +273,17 @@ fn check_timeouts(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     }
 }
 
+/// hyper's `max_buf_size` floor is 8192 and it panics below that, so a configured
+/// (non-zero) `maxHeaderBytes` must clear that floor.
+const MIN_HEADER_BYTES: usize = 8192;
+
+fn check_limits(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    let max_header = config.limits.max_header_bytes;
+    if max_header != 0 && max_header < MIN_HEADER_BYTES {
+        errors.push(ValidationError::MaxHeaderBytesTooSmall { value: max_header });
+    }
+}
+
 /// A wildcard host is valid only as a single leading `*.` label, e.g.
 /// `*.example.com` (no other `*`).
 fn is_valid_wildcard_host(host: &str) -> bool {
@@ -334,6 +346,7 @@ mod tests {
             }],
             upstreams: vec![upstream("api", vec![target("http://api-1:4000")])],
             timeouts: Default::default(),
+            limits: Default::default(),
             admin: None,
             metrics: None,
         }
@@ -641,6 +654,31 @@ mod tests {
         assert!(errors.contains(&ValidationError::ZeroTimeout {
             field: "requestTimeoutMs",
         }));
+    }
+
+    #[test]
+    fn rejects_too_small_max_header_bytes() {
+        let mut cfg = valid_config();
+        cfg.limits.max_header_bytes = 4096;
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::MaxHeaderBytesTooSmall { value: 4096 }));
+    }
+
+    #[test]
+    fn accepts_zero_or_valid_max_header_bytes() {
+        let mut cfg = valid_config();
+        cfg.limits.max_header_bytes = 0; // unset -> hyper default
+        assert!(validate(&cfg).is_ok());
+        cfg.limits.max_header_bytes = 8192; // at the floor
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_any_body_and_header_timeout_limits() {
+        let mut cfg = valid_config();
+        cfg.limits.max_body_bytes = 1; // any value is valid (0 = unlimited)
+        cfg.limits.header_read_timeout_ms = 0; // 0 = disabled, valid
+        assert!(validate(&cfg).is_ok());
     }
 
     #[test]

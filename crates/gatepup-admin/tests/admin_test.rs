@@ -63,6 +63,7 @@ fn sample_config() -> GatePupConfig {
             retries: None,
         }],
         timeouts: Default::default(),
+        limits: Default::default(),
         admin: None,
         metrics: None,
     }
