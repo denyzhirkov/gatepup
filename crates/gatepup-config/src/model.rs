@@ -18,6 +18,8 @@ pub struct GatePupConfig {
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     #[serde(default)]
+    pub compression: Option<CompressionConfig>,
+    #[serde(default)]
     pub admin: Option<AdminConfig>,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
@@ -83,6 +85,48 @@ impl Default for TimeoutConfig {
             request_timeout_ms: default_request_timeout_ms(),
         }
     }
+}
+
+/// Response compression. Negotiated via `Accept-Encoding`; only responses whose
+/// `Content-Type` is in `types` and (when known) at least `minBytes` are
+/// compressed, and an already-encoded response is passed through untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompressionConfig {
+    pub enabled: bool,
+    /// Allowed algorithms, preference order honored (`br` beats `gzip`).
+    #[serde(default = "default_compression_algorithms")]
+    pub algorithms: Vec<String>,
+    /// Skip responses smaller than this (when the length is known).
+    #[serde(default = "default_compression_min_bytes")]
+    pub min_bytes: u64,
+    /// Content types eligible for compression (exact `type/subtype`, no params).
+    #[serde(default = "default_compression_types")]
+    pub types: Vec<String>,
+}
+
+fn default_compression_algorithms() -> Vec<String> {
+    vec!["br".to_string(), "gzip".to_string()]
+}
+
+fn default_compression_min_bytes() -> u64 {
+    1024
+}
+
+fn default_compression_types() -> Vec<String> {
+    [
+        "text/html",
+        "text/plain",
+        "text/css",
+        "text/xml",
+        "application/json",
+        "application/javascript",
+        "application/xml",
+        "image/svg+xml",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

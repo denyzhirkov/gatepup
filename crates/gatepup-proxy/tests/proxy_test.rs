@@ -297,6 +297,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
         timeouts: Default::default(),
         limits: Default::default(),
         trusted_proxies: Vec::new(),
+        compression: None,
         admin: None,
         metrics: None,
     }
@@ -350,6 +351,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
         timeouts: Default::default(),
         limits: Default::default(),
         trusted_proxies: Vec::new(),
+        compression: None,
         admin: None,
         metrics: None,
     }
@@ -928,6 +930,135 @@ async fn rate_limits_excess_requests_with_429() {
     assert!(
         String::from_utf8_lossy(&body).contains("rate_limited"),
         "body was: {body:?}"
+    );
+}
+
+/// A backend returning `body_len` bytes with a given content-type and optional
+/// pre-set `content-encoding`. Used to exercise response compression.
+async fn spawn_typed_backend(
+    content_type: &'static str,
+    body_len: usize,
+    pre_encoding: Option<&'static str>,
+) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<hyper::body::Incoming>| async move {
+                    let mut builder = Response::builder().header("content-type", content_type);
+                    if let Some(enc) = pre_encoding {
+                        builder = builder.header("content-encoding", enc);
+                    }
+                    Ok::<_, Infallible>(
+                        builder
+                            .body(Full::new(Bytes::from(vec![b'a'; body_len])))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+    port
+}
+
+fn config_compress(proxy_port: u16, backend_port: u16) -> GatePupConfig {
+    let mut cfg = config(proxy_port, None, backend_port);
+    cfg.compression = Some(gatepup_config::CompressionConfig {
+        enabled: true,
+        algorithms: vec!["gzip".to_string()],
+        min_bytes: 1024,
+        types: vec!["text/html".to_string()],
+    });
+    cfg
+}
+
+async fn get_with_accept(port: u16, accept_encoding: &str) -> Response<hyper::body::Incoming> {
+    let req = Request::builder()
+        .uri(format!("http://127.0.0.1:{port}/"))
+        .header("accept-encoding", accept_encoding)
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    client().request(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn compresses_text_html_when_gzip_accepted() {
+    use std::io::Read;
+    let backend_port = spawn_typed_backend("text/html", 4096, None).await;
+    let proxy_port = free_port();
+    spawn_proxy(config_compress(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get_with_accept(proxy_port, "gzip").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("content-encoding").unwrap(), "gzip");
+    assert!(
+        resp.headers().get("content-length").is_none(),
+        "length dropped"
+    );
+    let vary = resp
+        .headers()
+        .get("vary")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_lowercase();
+    assert!(vary.contains("accept-encoding"), "vary: {vary}");
+
+    let compressed = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        compressed.len() < 4096,
+        "body should be smaller when compressed"
+    );
+    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).unwrap();
+    assert_eq!(out, vec![b'a'; 4096], "gzip round-trips to the original");
+}
+
+#[tokio::test]
+async fn passthrough_when_encoding_not_accepted() {
+    let backend_port = spawn_typed_backend("text/html", 4096, None).await;
+    let proxy_port = free_port();
+    spawn_proxy(config_compress(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    // No Accept-Encoding -> served uncompressed.
+    let resp = get(proxy_port).await;
+    assert!(resp.headers().get("content-encoding").is_none());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 4096);
+}
+
+#[tokio::test]
+async fn passthrough_already_encoded_response() {
+    // Backend already sets content-encoding -> proxy must not re-compress.
+    let backend_port = spawn_typed_backend("text/html", 4096, Some("br")).await;
+    let proxy_port = free_port();
+    spawn_proxy(config_compress(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get_with_accept(proxy_port, "gzip").await;
+    assert_eq!(resp.headers().get("content-encoding").unwrap(), "br");
+}
+
+#[tokio::test]
+async fn passthrough_small_body() {
+    let backend_port = spawn_typed_backend("text/html", 100, None).await;
+    let proxy_port = free_port();
+    spawn_proxy(config_compress(proxy_port, backend_port)).await;
+    wait_until_listening(proxy_port).await;
+
+    let resp = get_with_accept(proxy_port, "gzip").await;
+    assert!(
+        resp.headers().get("content-encoding").is_none(),
+        "small body not compressed"
     );
 }
 

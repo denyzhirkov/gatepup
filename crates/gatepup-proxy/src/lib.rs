@@ -7,6 +7,7 @@
 //! ([`arc_swap::ArcSwap`]) so it can be hot-swapped on config reload: handlers
 //! load the current snapshot per request; in-flight requests keep the old one.
 
+mod compress;
 mod error;
 mod health;
 mod proxy;

@@ -8,7 +8,7 @@ use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::request::Parts;
 use http::uri::PathAndQuery;
 use http::{Request, Response, StatusCode, Uri};
-use http_body_util::combinators::BoxBody;
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty, Full, Limited};
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnector;
@@ -44,7 +44,7 @@ const HOP_BY_HOP: &[&str] = &[
 
 /// Unified boxed body used for both the response we return and the request we
 /// send upstream (so streamed and buffered request bodies share one client type).
-pub(crate) type ResponseBody = BoxBody<Bytes, BoxError>;
+pub(crate) type ResponseBody = UnsyncBoxBody<Bytes, BoxError>;
 type HttpsClient = Client<HttpsConnector<HttpConnector>, ResponseBody>;
 
 /// Pooled upstream clients. `verify` validates `https://` upstream certificates
@@ -82,11 +82,13 @@ pub(crate) fn build_client(connect_timeout: Duration) -> Result<ProxyClient, Pro
 }
 
 fn box_incoming(body: Incoming) -> ResponseBody {
-    body.map_err(|e| Box::new(e) as BoxError).boxed()
+    body.map_err(|e| Box::new(e) as BoxError).boxed_unsync()
 }
 
 fn box_bytes(bytes: Bytes) -> ResponseBody {
-    Full::new(bytes).map_err(|never| match never {}).boxed()
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
 }
 
 /// The request body for an upstream attempt: either a buffered (replayable) body
@@ -179,7 +181,7 @@ async fn prepare_body_source(
             seen: 0,
             exceeded: exceeded.clone(),
         }
-        .boxed()
+        .boxed_unsync()
     } else {
         box_incoming(body)
     };
@@ -371,6 +373,13 @@ async fn forward(
 
     let (mut parts, body) = req.into_parts();
     let method = parts.method.clone();
+    // Captured before header rewrites for response compression negotiation.
+    let accept_encoding = parts
+        .headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     // Reject a declared-oversize body before touching the upstream.
     if body_exceeds_limit(&parts.headers, snapshot.max_body_bytes) {
         return Err(GatewayError::PayloadTooLarge);
@@ -449,6 +458,10 @@ async fn forward(
                 if status < 500 || is_last || !retry_5xx {
                     let mut response = resp.map(box_incoming);
                     route.response_headers.apply(response.headers_mut());
+                    if let Some(comp) = &snapshot.compression {
+                        response =
+                            crate::compress::maybe_compress(response, &accept_encoding, comp);
+                    }
                     return Ok(Forwarded {
                         response,
                         route: route_name,
@@ -774,7 +787,7 @@ fn error_response(err: GatewayError, request_id: &str) -> Response<ResponseBody>
     let (status, code) = err.parts();
     let body = Full::new(Bytes::from(format!("{{\"error\":\"{code}\"}}\n")))
         .map_err(|never| match never {})
-        .boxed();
+        .boxed_unsync();
 
     let mut resp = Response::new(body);
     *resp.status_mut() = status;

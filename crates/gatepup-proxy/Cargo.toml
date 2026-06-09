@@ -21,12 +21,16 @@ tokio-rustls.workspace = true
 hyper-rustls.workspace = true
 rustls-pemfile.workspace = true
 ipnet.workspace = true
+async-compression.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
 gatepup-observability.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
+flate2 = "1"
 hyper.workspace = true
 hyper-util.workspace = true
 http.workspace = true

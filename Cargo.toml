@@ -38,6 +38,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "native-tokio", "http1", "tls12", "logging"] }
 rustls-pemfile = "2"
 rcgen = "0.13"
+async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "brotli"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = { version = "0.3", default-features = false }
 
 gatepup-config = { path = "crates/gatepup-config" }
 gatepup-core = { path = "crates/gatepup-core" }

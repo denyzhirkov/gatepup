@@ -69,6 +69,7 @@ fn sample_config() -> GatePupConfig {
         timeouts: Default::default(),
         limits: Default::default(),
         trusted_proxies: Vec::new(),
+        compression: None,
         admin: None,
         metrics: None,
     }

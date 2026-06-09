@@ -91,6 +91,9 @@ pub enum ValidationError {
     )]
     InvalidTrustedProxy { value: String },
 
+    #[error("compression algorithm {value:?} is not supported (expected: gzip, br)")]
+    InvalidCompressionAlgorithm { value: String },
+
     #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
     ZeroWeight { upstream: String, url: String },
 

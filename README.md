@@ -343,6 +343,28 @@ client IP:
   is in-memory, sharded for low contention, and survives config reloads; idle
   buckets are evicted automatically, so memory stays bounded under an IP flood.
 
+## Compression
+
+Optionally compress responses (brotli / gzip), negotiated via `Accept-Encoding`:
+
+```json
+"compression": {
+  "enabled": true,
+  "algorithms": ["br", "gzip"],
+  "minBytes": 1024,
+  "types": ["text/html", "application/json", "text/css", "application/javascript"]
+}
+```
+
+- Streaming — the body is encoded frame-by-frame, never buffered whole.
+- `br` is preferred over `gzip` when the client accepts both.
+- Skipped when: the client doesn't accept an enabled algorithm; the response is
+  already encoded (`Content-Encoding` present); its `Content-Type` isn't in
+  `types`; or its known length is below `minBytes`.
+- `algorithms` defaults to `["br","gzip"]`, `minBytes` to `1024`, and `types` to
+  a common text/JSON/JS/CSS/SVG/XML set. Compressed responses get
+  `Vary: Accept-Encoding`.
+
 ## Docker
 
 Pull the published image from [Docker Hub](https://hub.docker.com/r/denyzhirkov/gatepup)

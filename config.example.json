@@ -93,6 +93,11 @@
     "maxHeaderBytes": 0
   },
   "trustedProxies": ["10.0.0.0/8"],
+  "compression": {
+    "enabled": true,
+    "algorithms": ["br", "gzip"],
+    "minBytes": 1024
+  },
   "admin": {
     "enabled": true,
     "bind": "127.0.0.1:8080"

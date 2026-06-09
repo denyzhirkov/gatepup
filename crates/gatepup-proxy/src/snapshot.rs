@@ -72,6 +72,17 @@ pub struct RuntimeConfig {
     /// Trusted upstream proxy networks: when the direct peer is in one of these,
     /// the client IP is resolved from `X-Forwarded-For`. Empty = peer is client.
     pub(crate) trusted_proxies: Arc<[IpNet]>,
+    /// Response compression settings, when enabled.
+    pub(crate) compression: Option<Compression>,
+}
+
+/// Runtime response-compression settings (resolved from config when enabled).
+#[derive(Clone)]
+pub(crate) struct Compression {
+    pub(crate) gzip: bool,
+    pub(crate) br: bool,
+    pub(crate) min_bytes: u64,
+    pub(crate) types: std::collections::HashSet<String>,
 }
 
 pub(crate) struct ListenerRuntime {
@@ -353,6 +364,16 @@ fn build_snapshot_inner(
             .then(|| Duration::from_millis(limits.header_read_timeout_ms)),
         max_header_bytes: (limits.max_header_bytes > 0).then_some(limits.max_header_bytes),
         trusted_proxies,
+        compression: config
+            .compression
+            .as_ref()
+            .filter(|c| c.enabled)
+            .map(|c| Compression {
+                gzip: c.algorithms.iter().any(|a| a == "gzip"),
+                br: c.algorithms.iter().any(|a| a == "br"),
+                min_bytes: c.min_bytes,
+                types: c.types.iter().cloned().collect(),
+            }),
     })
 }
 

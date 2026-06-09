@@ -20,6 +20,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
     check_timeouts(config, &mut errors);
     check_limits(config, &mut errors);
     check_trusted_proxies(config, &mut errors);
+    check_compression(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -369,6 +370,18 @@ fn check_limits(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     }
 }
 
+fn check_compression(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    if let Some(c) = &config.compression {
+        for algo in &c.algorithms {
+            if algo != "gzip" && algo != "br" {
+                errors.push(ValidationError::InvalidCompressionAlgorithm {
+                    value: algo.clone(),
+                });
+            }
+        }
+    }
+}
+
 fn check_trusted_proxies(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     for entry in &config.trusted_proxies {
         if parse_trusted_proxy(entry).is_none() {
@@ -461,6 +474,7 @@ mod tests {
             timeouts: Default::default(),
             limits: Default::default(),
             trusted_proxies: Vec::new(),
+            compression: None,
             admin: None,
             metrics: None,
         }
