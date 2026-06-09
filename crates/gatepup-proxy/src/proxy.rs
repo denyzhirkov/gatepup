@@ -14,6 +14,7 @@ use hyper::body::Incoming;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use ipnet::IpNet;
 use tokio::net::TcpStream;
 
 use gatepup_observability::Metrics;
@@ -162,6 +163,13 @@ pub(crate) async fn handle(
     let path = req.uri().path().to_string();
     let scheme = if is_tls { "https" } else { "http" };
     let snapshot = shared.load_full();
+    let client_ip = resolve_client_ip(
+        remote.ip(),
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok()),
+        &snapshot.trusted_proxies,
+    );
 
     metrics.inc_requests();
     let outcome = if is_upgrade(&req) {
@@ -208,6 +216,7 @@ pub(crate) async fn handle(
     metrics.observe_duration(started.elapsed().as_secs_f64());
     tracing::info!(
         request_id = %request_id,
+        client_ip = %client_ip,
         method = %method,
         host = %host,
         path = %path,
@@ -576,6 +585,25 @@ fn set_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
     }
 }
 
+/// Resolve the real client IP. When the direct peer is a trusted proxy, walk
+/// `X-Forwarded-For` right-to-left and return the first hop that is not itself a
+/// trusted proxy (the real client). With no trusted proxies (default) or an
+/// untrusted peer, inbound `X-Forwarded-For` is ignored and the peer is the
+/// client — so a spoofed header can never override the source address.
+fn resolve_client_ip(peer: IpAddr, xff: Option<&str>, trusted: &[IpNet]) -> IpAddr {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|net| net.contains(ip));
+    if trusted.is_empty() || !is_trusted(&peer) {
+        return peer;
+    }
+    let Some(xff) = xff else {
+        return peer;
+    };
+    xff.rsplit(',')
+        .filter_map(|hop| hop.trim().parse::<IpAddr>().ok())
+        .find(|ip| !is_trusted(ip))
+        .unwrap_or(peer)
+}
+
 fn request_host(req: &Request<Incoming>) -> String {
     let raw = req
         .headers()
@@ -688,6 +716,60 @@ mod tests {
         // No Content-Length (e.g. chunked) is not rejected up front; it is bounded
         // mid-stream by the BodySource wrapper instead.
         assert!(!body_exceeds_limit(&HeaderMap::new(), 10));
+    }
+
+    fn nets(cidrs: &[&str]) -> Vec<IpNet> {
+        cidrs.iter().map(|c| c.parse().unwrap()).collect()
+    }
+
+    fn addr(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn client_ip_is_peer_when_no_trusted_proxies() {
+        // Even a present XFF is ignored without configured trusted proxies.
+        let ip = resolve_client_ip(addr("198.51.100.9"), Some("1.2.3.4"), &[]);
+        assert_eq!(ip, addr("198.51.100.9"));
+    }
+
+    #[test]
+    fn client_ip_ignores_xff_from_untrusted_peer() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        // Peer is not trusted -> spoofed XFF must not override it.
+        let ip = resolve_client_ip(addr("198.51.100.9"), Some("1.2.3.4"), &trusted);
+        assert_eq!(ip, addr("198.51.100.9"));
+    }
+
+    #[test]
+    fn client_ip_from_trusted_peer_uses_rightmost_untrusted_xff() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        // peer 10.0.0.1 trusted; XFF: real client then a trusted hop.
+        let ip = resolve_client_ip(addr("10.0.0.1"), Some("203.0.113.7, 10.0.0.2"), &trusted);
+        assert_eq!(ip, addr("203.0.113.7"));
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_peer_when_all_hops_trusted() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        let ip = resolve_client_ip(addr("10.0.0.1"), Some("10.0.0.9, 10.0.0.2"), &trusted);
+        assert_eq!(ip, addr("10.0.0.1"));
+    }
+
+    #[test]
+    fn client_ip_trusted_peer_no_xff_is_peer() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        assert_eq!(
+            resolve_client_ip(addr("10.0.0.1"), None, &trusted),
+            addr("10.0.0.1")
+        );
+    }
+
+    #[test]
+    fn client_ip_skips_malformed_xff_entries() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        let ip = resolve_client_ip(addr("10.0.0.1"), Some("garbage, 203.0.113.7"), &trusted);
+        assert_eq!(ip, addr("203.0.113.7"));
     }
 
     #[test]

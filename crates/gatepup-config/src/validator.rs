@@ -19,6 +19,7 @@ pub fn validate(config: &GatePupConfig) -> Result<(), Vec<ValidationError>> {
     check_admin(config, &mut errors);
     check_timeouts(config, &mut errors);
     check_limits(config, &mut errors);
+    check_trusted_proxies(config, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -284,6 +285,30 @@ fn check_limits(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
     }
 }
 
+fn check_trusted_proxies(config: &GatePupConfig, errors: &mut Vec<ValidationError>) {
+    for entry in &config.trusted_proxies {
+        if parse_trusted_proxy(entry).is_none() {
+            errors.push(ValidationError::InvalidTrustedProxy {
+                value: entry.clone(),
+            });
+        }
+    }
+}
+
+/// Parse a trusted-proxy entry: either a CIDR (`10.0.0.0/8`) or a bare IP
+/// (treated as a single-host `/32` or `/128`). `None` if it is neither.
+pub fn parse_trusted_proxy(value: &str) -> Option<ipnet::IpNet> {
+    use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+    use std::net::IpAddr;
+    if let Ok(net) = value.parse::<IpNet>() {
+        return Some(net);
+    }
+    match value.parse::<IpAddr>().ok()? {
+        IpAddr::V4(v4) => Ipv4Net::new(v4, 32).ok().map(IpNet::V4),
+        IpAddr::V6(v6) => Ipv6Net::new(v6, 128).ok().map(IpNet::V6),
+    }
+}
+
 /// A wildcard host is valid only as a single leading `*.` label, e.g.
 /// `*.example.com` (no other `*`).
 fn is_valid_wildcard_host(host: &str) -> bool {
@@ -347,6 +372,7 @@ mod tests {
             upstreams: vec![upstream("api", vec![target("http://api-1:4000")])],
             timeouts: Default::default(),
             limits: Default::default(),
+            trusted_proxies: Vec::new(),
             admin: None,
             metrics: None,
         }
@@ -679,6 +705,38 @@ mod tests {
         cfg.limits.max_body_bytes = 1; // any value is valid (0 = unlimited)
         cfg.limits.header_read_timeout_ms = 0; // 0 = disabled, valid
         assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_proxy() {
+        let mut cfg = valid_config();
+        cfg.trusted_proxies = vec!["10.0.0.0/8".into(), "not-an-ip".into()];
+        let errors = validate(&cfg).unwrap_err();
+        assert!(errors.contains(&ValidationError::InvalidTrustedProxy {
+            value: "not-an-ip".into()
+        }));
+    }
+
+    #[test]
+    fn accepts_cidr_and_bare_ip_trusted_proxies() {
+        let mut cfg = valid_config();
+        cfg.trusted_proxies = vec![
+            "10.0.0.0/8".into(),
+            "192.168.1.1".into(),
+            "::1".into(),
+            "fd00::/8".into(),
+        ];
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parse_trusted_proxy_bare_ip_is_single_host() {
+        let net = parse_trusted_proxy("203.0.113.7").unwrap();
+        assert_eq!(net.prefix_len(), 32);
+        let in_net: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let out_net: std::net::IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(net.contains(&in_net));
+        assert!(!net.contains(&out_net));
     }
 
     #[test]

@@ -12,6 +12,11 @@ pub struct GatePupConfig {
     pub timeouts: TimeoutConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// CIDRs (or bare IPs) of proxies in front of GatePup whose `X-Forwarded-For`
+    /// is trusted when resolving the real client IP. Empty (default) means the
+    /// direct TCP peer is always treated as the client.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
     #[serde(default)]
     pub admin: Option<AdminConfig>,
     #[serde(default)]

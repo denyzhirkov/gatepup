@@ -292,6 +292,7 @@ fn config_with_health(proxy_port: u16, target_ports: &[u16], health_path: &str) 
         }],
         timeouts: Default::default(),
         limits: Default::default(),
+        trusted_proxies: Vec::new(),
         admin: None,
         metrics: None,
     }
@@ -340,6 +341,7 @@ fn config(proxy_port: u16, host: Option<&str>, backend_port: u16) -> GatePupConf
         }],
         timeouts: Default::default(),
         limits: Default::default(),
+        trusted_proxies: Vec::new(),
         admin: None,
         metrics: None,
     }

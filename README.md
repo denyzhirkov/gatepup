@@ -217,6 +217,27 @@ slow or oversized *inbound* requests:
 These are connection-level settings: a change takes effect on restart, not on a
 hot reload.
 
+## Client IP & trusted proxies
+
+GatePup logs the real client IP (`client_ip` in the access log) and appends the
+direct peer to `X-Forwarded-For`. When GatePup runs behind a CDN or another
+proxy, list those hops in `trustedProxies` so the real client is read from
+`X-Forwarded-For` instead of seeing the CDN's address:
+
+```json
+"trustedProxies": ["10.0.0.0/8", "192.168.0.0/16"]
+```
+
+- Entries are CIDRs or bare IPs (a bare IP is a single host).
+- The client IP is resolved by walking `X-Forwarded-For` right-to-left and taking
+  the first hop that is **not** a trusted proxy.
+- If the direct peer is **not** in `trustedProxies`, inbound `X-Forwarded-For` is
+  ignored entirely — a spoofed header can never override the source address.
+- Empty (default) means the direct TCP peer is always the client.
+
+This resolved client IP is what upcoming IP allow/deny and rate-limiting features
+will key on, so it must be correct behind your edge.
+
 ## Docker
 
 Pull the published image from [Docker Hub](https://hub.docker.com/r/denyzhirkov/gatepup)
@@ -299,8 +320,9 @@ See [`config.example.json`](./config.example.json) for a full example. A config
 declares `listeners` (with routes that match on host + path prefix), `upstreams`
 (target groups with weighted round-robin — each target has an optional `weight`,
 default 1 — and optional health checks), `timeouts` (`connectTimeoutMs` /
-`requestTimeoutMs`), `limits` (request body size + client header timeouts), and
-optional `admin` / `metrics` sections.
+`requestTimeoutMs`), `limits` (request body size + client header timeouts),
+`trustedProxies` (CIDRs whose `X-Forwarded-For` is trusted for the real client
+IP), and optional `admin` / `metrics` sections.
 
 ## Development
 

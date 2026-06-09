@@ -18,4 +18,4 @@ pub use model::{
     TimeoutConfig, TlsConfig, UpstreamConfig,
 };
 pub use resolve::{resolve_config, ConfigSource};
-pub use validator::validate;
+pub use validator::{parse_trusted_proxy, validate};

@@ -86,6 +86,7 @@
     "headerReadTimeoutMs": 15000,
     "maxHeaderBytes": 0
   },
+  "trustedProxies": ["10.0.0.0/8"],
   "admin": {
     "enabled": true,
     "bind": "127.0.0.1:8080"

@@ -124,6 +124,7 @@ fn build_from_env(get: &dyn Fn(&str) -> Option<String>) -> GatePupConfig {
         }],
         timeouts: TimeoutConfig::default(),
         limits: LimitsConfig::default(),
+        trusted_proxies: Vec::new(),
         admin: None,
         metrics: None,
     }

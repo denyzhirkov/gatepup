@@ -297,6 +297,7 @@ dependencies = [
 name = "gatepup-config"
 version = "1.1.0"
 dependencies = [
+ "ipnet",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -340,6 +341,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ipnet",
  "rcgen",
  "rustls-pemfile",
  "serde",
@@ -590,6 +592,12 @@ dependencies = [
  "equivalent",
  "hashbrown",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "is_terminal_polyfill"

@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gatepup_config::{GatePupConfig, RetryConfig};
+use gatepup_config::{parse_trusted_proxy, GatePupConfig, RetryConfig};
 use http::Method;
+use ipnet::IpNet;
 use serde::Serialize;
 use tokio_rustls::TlsAcceptor;
 
@@ -68,6 +69,9 @@ pub struct RuntimeConfig {
     /// Max connection read-buffer bytes (bounds the header section); `None` keeps
     /// hyper's default. Connection-level.
     pub(crate) max_header_bytes: Option<usize>,
+    /// Trusted upstream proxy networks: when the direct peer is in one of these,
+    /// the client IP is resolved from `X-Forwarded-For`. Empty = peer is client.
+    pub(crate) trusted_proxies: Arc<[IpNet]>,
 }
 
 pub(crate) struct ListenerRuntime {
@@ -329,6 +333,13 @@ fn build_snapshot_inner(
     }
 
     let limits = &config.limits;
+    // Entries are validated before a snapshot is built; parse defensively and
+    // drop any that don't resolve (validation would have already flagged them).
+    let trusted_proxies: Arc<[IpNet]> = config
+        .trusted_proxies
+        .iter()
+        .filter_map(|s| parse_trusted_proxy(s))
+        .collect();
     Ok(RuntimeConfig {
         listeners,
         upstreams,
@@ -338,6 +349,7 @@ fn build_snapshot_inner(
         header_read_timeout: (limits.header_read_timeout_ms > 0)
             .then(|| Duration::from_millis(limits.header_read_timeout_ms)),
         max_header_bytes: (limits.max_header_bytes > 0).then_some(limits.max_header_bytes),
+        trusted_proxies,
     })
 }
 

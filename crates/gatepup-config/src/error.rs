@@ -83,6 +83,11 @@ pub enum ValidationError {
     #[error("limits maxHeaderBytes {value} must be 0 (hyper default) or at least 8192")]
     MaxHeaderBytesTooSmall { value: usize },
 
+    #[error(
+        "trustedProxies entry {value:?} is not a valid IP or CIDR (e.g. 10.0.0.0/8 or 203.0.113.7)"
+    )]
+    InvalidTrustedProxy { value: String },
+
     #[error("upstream {upstream:?} target {url:?} has weight 0 (must be >= 1)")]
     ZeroWeight { upstream: String, url: String },
 

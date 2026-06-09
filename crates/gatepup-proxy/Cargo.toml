@@ -19,6 +19,7 @@ thiserror.workspace = true
 arc-swap.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
+ipnet.workspace = true
 
 [dev-dependencies]
 gatepup-config.workspace = true
